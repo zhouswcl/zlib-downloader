@@ -161,10 +161,21 @@ def upload_to_aliyundrive(
         part_list = cr.get("part_info_list", [])
         if upload_url:
             print(f"  单链接上传...")
-            with open(local_path, "rb") as f:
-                r5 = req.put(upload_url, data=f, timeout=600)
-                if r5.status_code not in (200, 201, 204):
-                    return {"success": False, "error": f"上传失败: {r5.status_code}"}
+            # 重试 3 次，每次 300s
+            for attempt in range(3):
+                try:
+                    with open(local_path, "rb") as f:
+                        r5 = req.put(upload_url, data=f, timeout=600)
+                    if r5.status_code in (200, 201, 204):
+                        break
+                    print(f"  重试 {attempt+1}/3 (HTTP {r5.status_code})...")
+                except Exception as e:
+                    print(f"  重试 {attempt+1}/3 ({e})...")
+                    if attempt == 2:
+                        return {"success": False, "error": f"上传失败(3次重试): {e}"}
+                    import time; time.sleep(5)
+            else:
+                return {"success": False, "error": f"上传失败: HTTP {r5.status_code}"}
         elif part_list:
             print(f"  多分片上传 ({len(part_list)} 片)...")
             with open(local_path, "rb") as f:
