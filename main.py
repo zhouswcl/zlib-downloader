@@ -97,18 +97,13 @@ def upload_to_aliyundrive(
             return {"success": False, "error": f"aliyunpan 安装失败: {r.stderr.strip()[:200]}"}
         print("  aliyunpan 安装完成")
 
-    # 登录阿里云盘
-    r = subprocess.run(
-        ["aliyunpan", "login", "-refreshToken", refresh_token],
-        capture_output=True, text=True, timeout=30,
-    )
-    if r.returncode != 0:
-        return {"success": False, "error": f"aliyunpan 登录失败: {r.stderr.strip()[:200]}"}
-
-    # 上传到 /zlib_books/ 目录
+    # 登录阿里云盘（试一版可能崩溃，跳过直接上传）
+    # 直接通过环境变量传 token 给 upload 命令
+    env = os.environ.copy()
+    env["ALIYUNPAN_REFRESH_TOKEN"] = refresh_token
     result = subprocess.run(
         ["aliyunpan", "upload", local_path, parent_id],
-        capture_output=True, text=True, timeout=600,
+        capture_output=True, text=True, timeout=600, env=env,
     )
     if result.returncode != 0:
         return {"success": False, "error": f"aliyunpan 上传失败: {result.stderr.strip()[:200]}"}
