@@ -20,10 +20,10 @@ USER_AGENT = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 
-# Z-Library 域名优先级链（singlelogin.re 是最稳定的登录入口）
+# Z-Library 域名优先级链（z-lib.sk 是 Go 客户端的默认域名）
 DEFAULT_DOMAINS = [
-    "https://singlelogin.re",
     "https://z-lib.sk",
+    "https://singlelogin.re",
     "https://z-lib.io",
     "https://z-lib.is",
 ]
@@ -82,6 +82,11 @@ class ZLibraryClient:
         }
         try:
             resp = self.session.post(url, data=data, timeout=30)
+            # 有些域名返回空或非 JSON（如 singlelogin.re），跳过
+            ct = resp.headers.get("content-type", "")
+            if "json" not in ct.lower():
+                print(f"[!] {domain}: 非 JSON 响应 (content-type: {ct})")
+                return False
             result = resp.json()
             err = result.get("response", {}).get("validationError")
             if err is None:
@@ -89,6 +94,8 @@ class ZLibraryClient:
             print(f"[!] {domain}: 登录被拒 - {err}")
         except requests.Timeout:
             print(f"[!] {domain}: 超时")
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"[!] {domain}: 非 JSON 响应 - {e}")
         except Exception as e:
             print(f"[!] {domain}: {e}")
         return False
@@ -103,47 +110,102 @@ class ZLibraryClient:
             raise ZLibraryError("未登录")
 
         targets = [self.domain] + [d for d in self.domains if d != self.domain]
-        seen_ids = set()
 
         for domain in targets:
             try:
-                url = f"{domain}/s/{requests.utils.quote(query)}?page={page}"
-                resp = self.session.get(url, timeout=30)
+                # 匹配 Go 客户端 URL: {domain}/s/{query}?&page=N
+                encoded = requests.utils.quote(query)
+                url = f"{domain}/s/{encoded}?&page={page}"
+                print(f"  搜索 URL: {url}")
+                resp = self.session.get(url, timeout=30, headers={
+                    "Referer": f"{domain}/",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                })
                 if resp.status_code != 200:
+                    print(f"  HTTP {resp.status_code}, 尝试下一个域名")
                     continue
 
                 books = self._parse_search_results(resp.text, domain)
                 if books:
-                    unique = []
-                    for b in books:
-                        bid = b.get("id", "")
-                        if bid and bid not in seen_ids:
-                            seen_ids.add(bid)
-                            unique.append(b)
-                    if unique:
-                        return unique[:count]
+                    return books[:count]
+
+                # 调试: 保存 HTML 片段到日志
+                snippet = resp.text[:2000].replace("\n", " ")[:300]
+                print(f"  页面加载成功但未解析到书，HTML 开头: {snippet}...")
+                print(f"  尝试备用搜索 URL 格式...")
+
+                # 备用: 尝试 /search/ 路径
+                url2 = f"{domain}/search/{encoded}/?page={page}"
+                resp2 = self.session.get(url2, timeout=30)
+                if resp2.status_code == 200:
+                    books = self._parse_search_results(resp2.text, domain)
+                    if books:
+                        return books[:count]
+                    snippet2 = resp2.text[:2000].replace("\n", " ")[:200]
+                    print(f"  备用格式也未解析到结果: {snippet2}...")
+
             except Exception as e:
-                print(f"[!] 搜索失败 ({domain}): {e}")
+                print(f"[!] 搜索失败 ({domain}): {type(e).__name__}: {e}")
                 continue
         return []
 
     def _parse_search_results(self, html: str, domain: str) -> list[dict]:
-        """解析搜索结果的 HTML"""
+        """解析搜索结果的 HTML（多策略）"""
         soup = BeautifulSoup(html, "html.parser")
         books = []
 
-        # 方法 1: z-bookcard 自定义元素 (新版 Z-Library)
-        for card in soup.select("z-bookcard, [is='z-bookcard']"):
+        # 策略 1: z-bookcard 自定义元素 (新版 Z-Library)
+        cards = soup.select("z-bookcard, [is='z-bookcard'], book-card, [class*=bookCard]")
+        for card in cards:
             book = self._parse_book_card(card, domain)
             if book.get("id") or book.get("title"):
                 books.append(book)
 
-        # 方法 2: 传统 .book-item 结构 (旧版镜像)
+        # 策略 2: 传统 .book-item 结构
         if not books:
-            for card in soup.select(".book-item, [class*=resItemCard]"):
+            for card in soup.select(".book-item, [class*=resItemCard], [class*=bookItem]"):
                 book = self._parse_book_card_legacy(card, domain)
                 if book.get("title"):
                     books.append(book)
+
+        # 策略 3: 所有带 book 链接的卡片 (最通用的匹配)
+        if not books:
+            for card in soup.select('[class*="card"]:has(a[href*="/book/"]), [class*="item"]:has(a[href*="/book/"])'):
+                book = self._parse_book_card_legacy(card, domain)
+                if book.get("title"):
+                    books.append(book)
+
+        # 策略 4: 直接从搜索结果框解析所有链接
+        if not books:
+            result_box = soup.select_one("#searchResultBox, [class*=searchResult], [class*=resultBox]")
+            if result_box:
+                for a in result_box.select('a[href*="/book/"]'):
+                    book = {
+                        "id": "",
+                        "title": a.get_text(strip=True),
+                        "url": urljoin(domain, a.get("href", "")),
+                        "author": "",
+                        "extension": "",
+                        "size": "",
+                    }
+                    m = re.search(r"/book/([^/]+)", a.get("href", ""))
+                    if m:
+                        book["id"] = m.group(1)
+                    # 找父级中的其他信息
+                    parent = a.parent
+                    for _ in range(5):
+                        if parent:
+                            text = parent.get_text(" ", strip=True)
+                            # 尝试提取格式和大小
+                            fm = re.search(r"\b(pdf|epub|mobi|txt|djvu|fb2|docx?)\b", text, re.I)
+                            if fm:
+                                book["extension"] = fm.group(1).lower()
+                            sm = re.search(r"(\d+(?:[.,]\d+)?)\s*(MB|KB|GB)", text, re.I)
+                            if sm:
+                                book["size"] = sm.group(0)
+                            parent = parent.parent if parent.name != "html" else None
+                    if book.get("title"):
+                        books.append(book)
 
         return books
 
