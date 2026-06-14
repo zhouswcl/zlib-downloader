@@ -61,14 +61,15 @@ def _run_zlib_in_pty(*args: str, timeout: int = 300) -> tuple[str, int]:
     cmd_str = " ".join(cmd)
 
     # 使用 script 建立 PTY，让 bubbletea 正常工作
-    script_cmd = ["script", "-qec", cmd_str, "/dev/null"]
+    # 注意: script 会忽略 SIGTERM，必须在外面包 timeout 命令确保超时能生效
+    script_cmd = ["timeout", str(timeout), "script", "-qec", cmd_str, "/dev/null"]
 
     try:
         result = subprocess.run(
             script_cmd,
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=timeout + 30,  # 给 timeout 命令额外 30s 处理时间
         )
     except subprocess.TimeoutExpired:
         raise ZLibraryError(f"zlib {' '.join(args)} timed out ({timeout}s)")
