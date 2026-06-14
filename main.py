@@ -89,39 +89,32 @@ def upload_to_aliyundrive(
 
     rclone_cmd = "rclone"
     if not has_aliyun:
-        print("  正在安装 rclone v1.65.2（含 aliyundrive 支持）...")
+        print("  正在安装 aliyunpan CLI（阿里云盘专用工具）...")
         r = subprocess.run(
-            ["sudo", "bash", "-c", "curl -fsSL -o /tmp/rclone.deb https://github.com/rclone/rclone/releases/download/v1.65.2/rclone-v1.65.2-linux-amd64.deb && dpkg -i /tmp/rclone.deb"],
+            ["sudo", "bash", "-c", "curl -fsSL -o /tmp/aliyunpan.tar.gz https://github.com/tickstep/aliyunpan/releases/download/v0.3.9/aliyunpan-v0.3.9-linux-amd64.tar.gz && tar xzf /tmp/aliyunpan.tar.gz -C /tmp/ && sudo cp /tmp/aliyunpan-v0.3.9-linux-amd64/aliyunpan /usr/local/bin/ && rm -rf /tmp/aliyunpan*"],
             capture_output=True, text=True, timeout=60,
         )
         if r.returncode != 0:
-            return {"success": False, "error": f"rclone 安装失败: {r.stderr.strip()[:200]}"}
-        print("  rclone 安装完成")
+            return {"success": False, "error": f"aliyunpan 安装失败: {r.stderr.strip()[:200]}"}
+        print("  aliyunpan 安装完成")
 
-    config_content = f"""[aliyun]
-type = aliyundrive
-token = {{"refresh_token":"{refresh_token}"}}
-root_folder_id = {parent_id or "root"}
-"""
-    config_path = os.path.join(tempfile.gettempdir(), f"rclone_aliyun_{os.getpid()}.conf")
-    try:
-        with open(config_path, "w") as f:
-            f.write(config_content)
+    # 用 aliyunpan 上传
+    # 先配置 refresh_token
+    r = subprocess.run(
+        ["aliyunpan", "config", "set", "--refresh-token", refresh_token],
+        capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode != 0:
+        return {"success": False, "error": f"aliyunpan 配置失败: {r.stderr.strip()[:200]}"}
 
-        result = subprocess.run(
-            ["rclone", "--config", config_path, "copy", local_path, "aliyun:", "--progress"],
-            capture_output=True, text=True, timeout=600,
-        )
-        if result.returncode != 0:
-            return {"success": False, "error": f"rclone 上传失败: {result.stderr.strip()[:200]}"}
-        return {"success": True, "file_name": filename, "size": file_size}
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": "上传超时 (600s)"}
-    except Exception as e:
-        return {"success": False, "error": f"上传异常: {e}"}
-    finally:
-        if os.path.exists(config_path):
-            os.remove(config_path)
+    result = subprocess.run(
+        ["aliyunpan", "upload", local_path, parent_id or "root"],
+        capture_output=True, text=True, timeout=600,
+    )
+    if result.returncode != 0:
+        return {"success": False, "error": f"aliyunpan 上传失败: {result.stderr.strip()[:200]}"}
+
+    return {"success": True, "file_name": filename, "size": file_size}
 
 
 def human_size(n: int) -> str:
