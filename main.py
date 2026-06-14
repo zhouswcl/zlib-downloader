@@ -56,17 +56,22 @@ def zlib_login(email: str, password: str):
 def zlib_search(query: str) -> list[dict]:
     """搜索图书，返回列表"""
     print(f"  搜索: '{query}'")
-    # zlib search 在非交互模式输出表格，解析结果
-    # 用 env ZLIB_DOMAIN 覆盖默认域名
     result = subprocess.run(
         ["zlib", "search", query, "--page", "1"],
         capture_output=True, text=True, timeout=30,
     )
+    print(f"  zlib 返回码: {result.returncode}")
+    print(f"  stdout ({len(result.stdout)}B): {result.stdout[:500]}")
+    if result.stderr:
+        print(f"  stderr ({len(result.stderr)}B): {result.stderr[:300]}")
+
     if result.returncode != 0:
-        print(f"  [!] 搜索失败: {result.stderr[:200]}")
+        print(f"  [!] 搜索失败")
         return []
 
-    return _parse_zlib_search_output(result.stdout)
+    books = _parse_zlib_search_output(result.stdout)
+    print(f"  解析到 {len(books)} 本书")
+    return books
 
 
 def _parse_zlib_search_output(output: str) -> list[dict]:
