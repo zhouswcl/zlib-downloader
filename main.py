@@ -201,7 +201,7 @@ def main():
     zlib_email = os.environ.get("ZLIB_EMAIL", "")
     zlib_password = os.environ.get("ZLIB_PASSWORD", "")
     aliyun_token = os.environ.get("ALIYUNDRIVE_REFRESH_TOKEN", "")
-    aliyun_parent = os.environ.get("ALIYUNDRIVE_PARENT_ID") or "6a2e1a8bdc4fe55a4f7e4221a019398165e4e05b"
+    aliyun_parent = os.environ.get("ALIYUNDRIVE_PARENT_ID") or "6a2e31c0552ec034ce794f12801793527bf52cba"
 
     if not zlib_email or not zlib_password:
         print("ERROR: ZLIB_EMAIL and ZLIB_PASSWORD must be set")
