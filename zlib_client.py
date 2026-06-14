@@ -59,17 +59,15 @@ def _run_zlib_in_pty(*args: str, timeout: int = 300) -> tuple[str, int]:
     """在伪终端中运行 zlib CLI 命令（用于 bubbletea TUI 命令如 download）"""
     cmd = ["zlib"] + list(args)
     cmd_str = " ".join(cmd)
-
-    # 使用 script 建立 PTY + timeout 防止 script 本身卡死
-    script_cmd = ["timeout", str(timeout), "script", "-qec", cmd_str, "/dev/null"]
-    effective_timeout = timeout + 30  # 给 script 和 timeout 之间留余量
+    # 使用 script 建立 PTY，让 bubbletea 正常工作
+    script_cmd = ["script", "-qec", cmd_str, "/dev/null"]
 
     try:
         result = subprocess.run(
             script_cmd,
             capture_output=True,
             text=True,
-            timeout=effective_timeout,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         raise ZLibraryError(f"zlib {' '.join(args)} timed out ({timeout}s)")

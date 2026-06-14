@@ -29,11 +29,21 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Install zlib CLI
+      - name: Cache zlib CLI
+        id: cache-zlib
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/zlib
+          key: zlib-cli-v1
+
+      - name: Install zlib CLI (if not cached)
+        if: steps.cache-zlib.outputs.cache-hit != 'true'
         run: |
           curl -fsSL https://raw.githubusercontent.com/heartleo/zlib/main/install.sh | sudo sh
           echo "ZLIB_HOME=/usr/local/bin" >> $GITHUB_ENV
-          zlib version
+          
+      - name: Verify zlib CLI
+        run: zlib version
 
       - name: Run download script
         env:
@@ -49,4 +59,4 @@ jobs:
           if [ -n "${{ github.event.inputs.max_downloads }}" ]; then
             ARGS="$ARGS --max-downloads ${{ github.event.inputs.max_downloads }}"
           fi
-          python main.py $ARGS --json
+          python -u main.py $ARGS --json
