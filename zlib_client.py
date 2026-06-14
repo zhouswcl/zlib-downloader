@@ -310,6 +310,27 @@ def download(book_id: str, dest_dir: str, timeout: int = 600) -> Optional[dict]:
                 print(f"  [!] 备用方式也失败: {result_direct.stderr.strip()[:300]}")
         except Exception as e2:
             print(f"  [!] 备用方式异常: {e2}")
+
+        # 第三层 fallback: Python 直接下载（用 zlib 的 cookie）
+        print(f"  [!] 尝试直接下载方式 (Python + Cookie)...")
+        try:
+            import direct_download
+            session = load_session()
+            domain = (session or {}).get("domain", "https://z-lib.sk")
+            result = direct_download.download_book(
+                book_id, domain, session or {}, dest_dir, timeout
+            )
+            if result:
+                return {
+                    **result,
+                    "book_id": book_id,
+                }
+            print(f"  [!] 直接下载也失败")
+        except ImportError:
+            print(f"  [!] direct_download 模块不可用")
+        except Exception as e3:
+            print(f"  [!] 直接下载异常: {e3}")
+
         return None
 
     print(f"  输出: {summary}")
