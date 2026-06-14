@@ -97,18 +97,96 @@ def upload_to_aliyundrive(
             return {"success": False, "error": f"aliyunpan 安装失败: {r.stderr.strip()[:200]}"}
         print("  aliyunpan 安装完成")
 
-    # 登录阿里云盘（试一版可能崩溃，跳过直接上传）
-    # 直接通过环境变量传 token 给 upload 命令
-    env = os.environ.copy()
-    env["ALIYUNPAN_REFRESH_TOKEN"] = refresh_token
-    result = subprocess.run(
-        ["aliyunpan", "upload", local_path, parent_id],
-        capture_output=True, text=True, timeout=600, env=env,
-    )
-    if result.returncode != 0:
-        return {"success": False, "error": f"aliyunpan 上传失败: {result.stderr.strip()[:200]}"}
+    # 用阿里云盘 API 上传（带详细调试输出）
+    import requests as req
+    print(f"  刷新 token...")
+    r = req.post("https://api.aliyundrive.com/v2/account/token", json={
+        "grant_type": "refresh_token", "refresh_token": refresh_token,
+    }, timeout=15)
+    if r.status_code != 200:
+        return {"success": False, "error": f"token失败: {r.status_code}: {r.text[:200]}"}
+    tok = r.json()
+    at = tok.get("access_token", "")
+    did = tok.get("default_drive_id", "")
+    print(f"  drive_id={did}, access_token OK")
 
-    return {"success": True, "file_name": filename, "size": file_size}
+    hdrs = {"Authorization": f"Bearer {at}"}
+
+    # 先列出根目录，确认能访问
+    r2 = req.post("https://api.aliyundrive.com/adrive/v2/file/list", headers=hdrs, json={
+        "drive_id": did, "parent_file_id": "root", "limit": 5,
+    }, timeout=15)
+    print(f"  列目录: HTTP {r2.status_code} {r2.text[:200]}")
+
+    if r2.status_code == 200:
+        items = r2.json().get("items", [])
+        for item in items:
+            print(f"    {item['name']}: {item['file_id']} ({item['type']})")
+
+        # 找 zlib-github-books 文件夹
+        folder_id = None
+        for item in items:
+            if item["type"] == "folder" and "zlib" in item["name"].lower():
+                folder_id = item["file_id"]
+                print(f"  找到目标文件夹: {item['name']} -> {folder_id}")
+                break
+        if not folder_id:
+            print("  目标文件夹不存在，尝试创建...")
+            r3 = req.post("https://api.aliyundrive.com/adrive/v2/file/create", headers=hdrs, json={
+                "drive_id": did, "name": "zlib-github-books", "parent_file_id": "root",
+                "type": "folder", "check_name_mode": "auto_rename",
+            }, timeout=15)
+            if r3.status_code in (200, 201):
+                folder_id = r3.json().get("file_id", "")
+                print(f"  已创建: {folder_id}")
+            else:
+                return {"success": False, "error": f"创建文件夹失败: {r3.status_code}: {r3.text[:200]}"}
+
+        # 上传文件
+        print(f"  创建文件记录...")
+        r4 = req.post("https://api.aliyundrive.com/adrive/v2/file/create", headers=hdrs, json={
+            "drive_id": did, "name": filename,
+            "parent_file_id": folder_id,
+            "type": "file", "size": file_size,
+            "check_name_mode": "auto_rename",
+        }, timeout=15)
+        if r4.status_code not in (200, 201):
+            return {"success": False, "error": f"创建文件记录失败: {r4.status_code}: {r4.text[:200]}"}
+        cr = r4.json()
+        if cr.get("rapid_upload"):
+            return {"success": True, "file_name": filename, "size": file_size, "rapid_upload": True}
+
+        # 分片上传
+        upload_url = cr.get("upload_url", "")
+        part_list = cr.get("part_info_list", [])
+        if upload_url:
+            print(f"  单链接上传...")
+            with open(local_path, "rb") as f:
+                r5 = req.put(upload_url, data=f, timeout=600)
+                if r5.status_code not in (200, 201, 204):
+                    return {"success": False, "error": f"上传失败: {r5.status_code}"}
+        elif part_list:
+            print(f"  多分片上传 ({len(part_list)} 片)...")
+            with open(local_path, "rb") as f:
+                for part in part_list:
+                    u = part.get("upload_url", "")
+                    n = part.get("part_number", 1)
+                    if not u: continue
+                    chunk = f.read(part.get("size", 0)) if n < len(part_list) else f.read()
+                    r5 = req.put(u, data=chunk, timeout=300)
+                    if r5.status_code not in (200, 201, 204):
+                        return {"success": False, "error": f"分片{n}失败: {r5.status_code}"}
+            upload_id = cr.get("upload_id", "")
+            if cr.get("file_id") and upload_id:
+                req.post("https://api.aliyundrive.com/adrive/v2/file/complete", headers=hdrs, json={
+                    "drive_id": did, "file_id": cr["file_id"], "upload_id": upload_id,
+                }, timeout=15)
+        else:
+            return {"success": False, "error": f"无上传方式: {cr}"}
+
+        return {"success": True, "file_name": filename, "size": file_size}
+
+    return {"success": False, "error": f"列目录失败: {r2.text[:200]}"}
 
 
 def human_size(n: int) -> str:
