@@ -29,19 +29,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Cache zlib CLI
-        id: cache-zlib
-        uses: actions/cache@v4
-        with:
-          path: /usr/local/bin/zlib
-          key: zlib-cli-v1
-
-      - name: Install zlib CLI (if not cached)
-        if: steps.cache-zlib.outputs.cache-hit != 'true'
+      - name: Download zlib CLI from Release
         run: |
-          curl -fsSL https://raw.githubusercontent.com/heartleo/zlib/main/install.sh | sudo sh
+          curl -fsSL -o /tmp/zlib \
+            "https://github.com/zhouswcl/zlib-downloader/releases/download/zlib-v0.0.2/zlib-linux-amd64"
+          chmod +x /tmp/zlib
+          sudo mv /tmp/zlib /usr/local/bin/zlib
           echo "ZLIB_HOME=/usr/local/bin" >> $GITHUB_ENV
-          
+
       - name: Verify zlib CLI
         run: zlib version
 
