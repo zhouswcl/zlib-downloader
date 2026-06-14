@@ -1,24 +1,16 @@
 #!/usr/bin/env python3
 """
-Z-Library 每日图书下载器
-========================
-工作流程: 搜索 -> 下载 -> 上传阿里云盘
-
-两种模式:
-  1. 自动模式: 按 config.json 的 keywords 轮换搜索
-  2. 手动模式: python main.py --keywords "机器学习,深度学习"
-
-环境变量:
-  ZLIB_EMAIL            Z-Library 邮箱
-  ZLIB_PASSWORD         Z-Library 密码
-  ALIYUNDRIVE_REFRESH_TOKEN  阿里云盘 refresh_token
-  ALIYUNDRIVE_PARENT_ID      阿里云盘上传目录 ID (默认 root)
+Z-Library 下载器（使用 heartleo/zlib Go CLI）
+通过 subprocess 调用 zlib 二进制处理 Z-Library 交互，
+Python 只负责阿里云盘上传。
 """
 
 import argparse
 import json
 import os
 import random
+import re
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -26,31 +18,17 @@ from pathlib import Path
 
 import requests
 
-# 项目根目录
 ROOT = Path(__file__).parent.resolve()
 DATA_DIR = ROOT / "data"
 DOWNLOAD_DIR = ROOT / "downloads"
-CONFIG_FILE = ROOT / "config.json"
 HISTORY_FILE = DATA_DIR / "downloaded_ids.json"
 
-# Aliyun Drive API
 ALIYUN_TOKEN_URL = "https://api.aliyundrive.com/v2/account/token"
 ALIYUN_CREATE_URL = "https://api.aliyundrive.com/v2/file/create"
 ALIYUN_COMPLETE_URL = "https://api.aliyundrive.com/v2/file/complete"
 
-# 只在 GitHub Actions Runner 上能访问 Z-Library，
-# 所以这里只做文件系统操作和上传；登录/搜索/下载由 Runner 的海外网络完成。
-# 但在 GitHub Actions 中运行的是同一个脚本，不需要区分。
-
-
-def load_config() -> dict:
-    """加载配置文件"""
-    with open(CONFIG_FILE) as f:
-        return json.load(f)
-
 
 def load_history() -> set:
-    """加载已下载的图书 ID"""
     if HISTORY_FILE.exists():
         with open(HISTORY_FILE) as f:
             return set(json.load(f))
@@ -58,37 +36,167 @@ def load_history() -> set:
 
 
 def save_history(book_ids: set):
-    """保存已下载的图书 ID"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(HISTORY_FILE, "w") as f:
         json.dump(list(book_ids), f)
 
 
-def select_keywords(args_keywords: str, config: dict) -> list[str]:
-    """选择搜索关键词"""
-    if args_keywords:
-        return [k.strip() for k in args_keywords.split(",")]
+def zlib_login(email: str, password: str):
+    """登录 Z-Library"""
+    print(f"  登录中...")
+    result = subprocess.run(
+        ["zlib", "login", "--email", email, "--password", password],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"登录失败: {result.stderr[:200]}")
+    print(f"  [✓] 登录成功")
 
-    keywords = config.get("keywords", [])
-    if not keywords:
+
+def zlib_search(query: str) -> list[dict]:
+    """搜索图书，返回列表"""
+    print(f"  搜索: '{query}'")
+    # zlib search 在非交互模式输出表格，解析结果
+    # 用 env ZLIB_DOMAIN 覆盖默认域名
+    result = subprocess.run(
+        ["zlib", "search", query, "--page", "1"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        print(f"  [!] 搜索失败: {result.stderr[:200]}")
         return []
 
-    # 轮换策略: 每天取一个关键词
-    day_of_year = datetime.now().timetuple().tm_yday
-    idx = day_of_year % len(keywords)
-    return [keywords[idx]]
+    return _parse_zlib_search_output(result.stdout)
 
 
-def upload_to_aliyundrive(
-    local_path: str,
-    refresh_token: str,
-    parent_id: str = "root",
-) -> dict:
+def _parse_zlib_search_output(output: str) -> list[dict]:
+    """解析 zlib search 的文本表格输出"""
+    books = []
+    lines = output.strip().split("\n")
+
+    for line in lines:
+        # 从表格行提取: 编号. ID 标题 | 作者 | 格式 | 评分
+        line = line.strip()
+
+        # 跳过非数据行
+        if not line or line.startswith("No results") or line.startswith("Found"):
+            continue
+
+        # 尝试提取 book ID (通常是第一列的数字+字母)
+        m = re.match(r"\s*\d+\.\s*(\S+)", line)
+        if not m:
+            continue
+
+        book_id = m.group(1)
+        if not book_id or len(book_id) < 5:
+            continue
+
+        books.append({"id": book_id})
+
+    return books
+
+
+def zlib_get_book_info(book_id: str) -> dict:
+    """获取图书详细信息（通过 book 页面 URL）"""
+    # 从详情页提取信息
+    # 使用 ZLIB_DOMAIN 环境变量
+    domain = os.environ.get("ZLIB_DOMAIN", "https://z-lib.sk")
+    try:
+        import requests
+        resp = requests.get(f"{domain}/book/{book_id}", timeout=15,
+                            headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code == 200:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(resp.text, "html.parser")
+            title = ""
+            author = ""
+            ext = ""
+            size_text = ""
+
+            zcover = soup.select_one("z-cover")
+            if zcover:
+                title = (zcover.get("title") or "").strip()
+
+            if not title:
+                h1 = soup.select_one("h1, [class*=title]")
+                if h1:
+                    title = h1.get_text(strip=True)
+
+            author_el = soup.select_one("i.authors a, [class*=author] a")
+            if author_el:
+                author = author_el.get_text(strip=True)
+
+            for prop in soup.select(".bookDetailsBox .property__file .property_value, "
+                                    ".bookDetailsBox [class*=file] .property_value"):
+                text = prop.get_text(strip=True)
+                m = re.search(r"\b(pdf|epub|mobi|txt|djvu|fb2|docx?)\b", text, re.I)
+                if m:
+                    ext = m.group(1).lower()
+                m = re.search(r"(\d+(?:[.,]\d+)?)\s*(MB|KB|GB)", text, re.I)
+                if m:
+                    size_text = m.group(0)
+
+            return {"title": title, "author": author, "extension": ext, "size": size_text}
+    except Exception:
+        pass
+    return {}
+
+
+def zlib_download(book_id: str, dest_dir: str) -> dict | None:
+    """下载图书"""
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"  下载: {book_id}")
+    try:
+        result = subprocess.run(
+            ["zlib", "download", book_id, "--dir", str(dest_dir)],
+            capture_output=True, text=True, timeout=300,
+        )
+
+        stdout = result.stdout + result.stderr
+        print(f"  zlib 输出: {stdout[:200]}")
+
+        if result.returncode != 0:
+            print(f"  [!] 下载失败: {result.stderr[:200]}")
+            return None
+
+        # 从输出中提取文件名和大小
+        m = re.search(r"Saved to:\s*(\S+)\s*\((\d+)\s*bytes\)", stdout)
+        if m:
+            filepath = m.group(1)
+            size = int(m.group(2))
+            return {
+                "filepath": filepath,
+                "filename": Path(filepath).name,
+                "size": size,
+                "book_id": book_id,
+            }
+
+        # fallback: 找目录中最新文件
+        files = sorted(dest_dir.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True)
+        if files:
+            f = files[0]
+            return {
+                "filepath": str(f),
+                "filename": f.name,
+                "size": f.stat().st_size,
+                "book_id": book_id,
+            }
+
+        return None
+    except subprocess.TimeoutExpired:
+        print(f"  [!] 下载超时")
+        return None
+    except Exception as e:
+        print(f"  [!] 下载异常: {e}")
+        return None
+
+
+def upload_to_aliyundrive(local_path: str, refresh_token: str, parent_id: str = "root") -> dict:
     """上传文件到阿里云盘"""
-    # Step 1: refresh_token -> access_token
     resp = requests.post(ALIYUN_TOKEN_URL, json={
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
+        "grant_type": "refresh_token", "refresh_token": refresh_token,
     })
     resp.raise_for_status()
     token_data = resp.json()
@@ -99,28 +207,16 @@ def upload_to_aliyundrive(
     file_size = os.path.getsize(local_path)
     filename = os.path.basename(local_path)
 
-    # Step 2: 创建文件记录，获取上传 URL
     create_resp = requests.post(ALIYUN_CREATE_URL, headers=headers, json={
-        "drive_id": drive_id,
-        "name": filename,
-        "parent_file_id": parent_id,
-        "type": "file",
-        "size": file_size,
-        "check_name_mode": "auto_rename",
+        "drive_id": drive_id, "name": filename, "parent_file_id": parent_id,
+        "type": "file", "size": file_size, "check_name_mode": "auto_rename",
     })
     create_resp.raise_for_status()
     create_data = create_resp.json()
 
     if create_data.get("rapid_upload"):
-        # 秒传成功
-        return {
-            "success": True,
-            "file_name": filename,
-            "file_id": create_data.get("file_id", ""),
-            "rapid_upload": True,
-        }
+        return {"success": True, "file_name": filename, "file_id": create_data.get("file_id", ""), "rapid_upload": True}
 
-    # Step 3: 上传文件内容
     upload_url = create_data.get("part_info_list", [{}])[0].get("upload_url", "")
     if not upload_url:
         upload_url = create_data.get("upload_url", "")
@@ -130,29 +226,18 @@ def upload_to_aliyundrive(
     with open(local_path, "rb") as f:
         upload_resp = requests.put(upload_url, data=f)
         if upload_resp.status_code not in (200, 201):
-            return {
-                "success": False,
-                "error": f"上传失败: HTTP {upload_resp.status_code}",
-            }
+            return {"success": False, "error": f"上传失败: HTTP {upload_resp.status_code}"}
 
-    # Step 4: 完成上传
     file_id = create_data.get("file_id", "")
     if file_id:
         requests.post(ALIYUN_COMPLETE_URL, headers=headers, json={
-            "drive_id": drive_id,
-            "file_id": file_id,
+            "drive_id": drive_id, "file_id": file_id,
         })
 
-    return {
-        "success": True,
-        "file_name": filename,
-        "file_id": file_id,
-        "size": file_size,
-    }
+    return {"success": True, "file_name": filename, "file_id": file_id, "size": file_size}
 
 
 def human_size(n: int) -> str:
-    """可读的文件大小"""
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024:
             return f"{n:.1f}{unit}"
@@ -161,35 +246,25 @@ def human_size(n: int) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Z-Library 每日图书下载器")
-    parser.add_argument("--keywords", help="搜索关键词 (逗号分隔，不传则从 config 轮换)")
-    parser.add_argument("--max-downloads", type=int, default=10, help="最多下载本数")
-    parser.add_argument("--json", action="store_true", help="输出 JSON 结果")
-    parser.add_argument("--upload", action="store_true", default=True, help="上传阿里云盘")
+    parser = argparse.ArgumentParser(description="Z-Library 图书下载 (zlib CLI)")
+    parser.add_argument("--keywords", default="热门图书", help="搜索关键词")
+    parser.add_argument("--max-downloads", type=int, default=10)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--upload", action="store_true", default=True)
     args = parser.parse_args()
 
-    config = load_config()
-    keywords = select_keywords(args.keywords, config)
-    max_downloads = min(args.max_downloads, config.get("max_daily", 10))
+    keywords = [k.strip() for k in args.keywords.split(",")] if args.keywords else ["热门图书"]
+    max_downloads = args.max_downloads
 
-    # 环境变量
     zlib_email = os.environ.get("ZLIB_EMAIL", "")
     zlib_password = os.environ.get("ZLIB_PASSWORD", "")
     aliyun_token = os.environ.get("ALIYUNDRIVE_REFRESH_TOKEN", "")
     aliyun_parent = os.environ.get("ALIYUNDRIVE_PARENT_ID", "root")
 
     if not zlib_email or not zlib_password:
-        print("ERROR: ZLIB_EMAIL and ZLIB_PASSWORD must be set")
-        sys.exit(1)
-    if not aliyun_token:
-        print("ERROR: ALIYUNDRIVE_REFRESH_TOKEN must be set")
+        print("ERROR: ZLIB_EMAIL and ZLIB_PASSWORD required")
         sys.exit(1)
 
-    # 初始化 Z-Library 客户端
-    from zlib_client import ZLibraryClient
-    zlib = ZLibraryClient(zlib_email, zlib_password)
-
-    # 已下载历史
     downloaded_ids = load_history()
     results = []
     total_size = 0
@@ -202,143 +277,95 @@ def main():
     print(f"{'='*60}\n")
 
     # Step 1: 登录
-    print("[1/4] 登录 Z-Library...")
+    print("[1/3] 登录 Z-Library...")
     try:
-        zlib.login()
+        zlib_login(zlib_email, zlib_password)
     except Exception as e:
-        print(f"[FAIL] 登录失败: {e}")
+        print(f"[FAIL] {e}")
         sys.exit(1)
 
-    # Step 2: 查询今日限额
-    print("[2/4] 查询下载限额...")
-    limit = zlib.get_daily_limit()
-    print(f"  今日已下载: {limit['used']}/{limit['total']} | 剩余: {limit['remaining']}")
-    max_downloads = min(max_downloads, limit["remaining"])
-    if max_downloads <= 0:
-        print("[!] 今日额度已用完")
-        sys.exit(0)
-
-    # Step 3: 搜索并下载
-    print(f"[3/4] 搜索并下载 (最多 {max_downloads} 本)...")
-    books_collected = []
+    # Step 2: 搜索并下载
+    print(f"[2/3] 搜索并下载...")
+    books_to_download = []
 
     for kw in keywords:
-        if len(books_collected) >= max_downloads:
+        if len(books_to_download) >= max_downloads:
             break
-        print(f"\n  搜索: '{kw}'")
-        try:
-            books = zlib.search(kw, page=1, count=max_downloads * 2)
-        except Exception as e:
-            print(f"  [!] 搜索失败: {e}")
-            continue
-
-        if not books:
-            print(f"  无结果")
-            continue
-
-        print(f"  找到 {len(books)} 本")
+        books = zlib_search(kw)
         for b in books:
             bid = b.get("id", "")
-            if not bid or bid in downloaded_ids:
-                continue
-            books_collected.append(b)
-            if len(books_collected) >= max_downloads:
-                break
+            if bid and bid not in downloaded_ids:
+                books_to_download.append(b)
+                if len(books_to_download) >= max_downloads:
+                    break
 
-    if not books_collected:
+    if not books_to_download:
         print("[!] 没有可下载的新书")
         sys.exit(0)
 
-    print(f"\n  将下载 {len(books_collected)} 本...")
-
-    # 下载目录
+    print(f"\n  将下载 {len(books_to_download)} 本...")
     date_str = datetime.now().strftime("%Y%m%d")
     dl_dir = DOWNLOAD_DIR / date_str
     dl_dir.mkdir(parents=True, exist_ok=True)
 
-    for i, book in enumerate(books_collected, 1):
-        bid = book.get("id", "")
-        title = book.get("title", "未知")[:50]
-        author = (book.get("author") or "未知")[:20]
-        ext = book.get("extension", "pdf")
-        print(f"\n  [{i}/{len(books_collected)}] {title}")
-        print(f"        作者: {author} | 格式: {ext} | 大小: {book.get('size', '?')}")
+    for i, book in enumerate(books_to_download, 1):
+        bid = book["id"]
+        print(f"\n  [{i}/{len(books_to_download)}] ID: {bid}")
 
-        result = zlib.download(bid, str(dl_dir), book.get("url", ""))
-        if result:
-            print(f"  [✓] 下载完成: {result['filename']} ({human_size(result['size'])})")
-            total_size += result["size"]
+        result = zlib_download(bid, str(dl_dir))
+        if not result:
+            print(f"  [!] 下载失败，跳过")
+            continue
 
-            # Step 4: 上传阿里云盘
-            upload_ok = False
-            if args.upload:
-                print(f"  上传阿里云盘...")
-                upload_result = upload_to_aliyundrive(
-                    result["filepath"], aliyun_token, aliyun_parent
-                )
-                if upload_result.get("success"):
-                    rapid = " (秒传)" if upload_result.get("rapid_upload") else ""
-                    print(f"  [✓] 上传成功{rapid}")
-                    result["upload"] = upload_result
-                    upload_ok = True
-                    success_count += 1
-                else:
-                    print(f"  [!] 上传失败: {upload_result.get('error', '?')}")
-                    result["upload"] = upload_result
-            else:
+        print(f"  [✓] 下载完成: {result['filename']} ({human_size(result['size'])})")
+        total_size += result["size"]
+
+        # 上传阿里云盘
+        upload_ok = False
+        if args.upload and aliyun_token:
+            print(f"  上传阿里云盘...")
+            upload_result = upload_to_aliyundrive(result["filepath"], aliyun_token, aliyun_parent)
+            if upload_result.get("success"):
+                print(f"  [✓] 上传成功{' (秒传)' if upload_result.get('rapid_upload') else ''}")
+                result["upload"] = upload_result
                 upload_ok = True
                 success_count += 1
-
-            results.append(result)
-
-            # 只有下载+上传都成功才记入历史，失败的下次重试
-            if upload_ok:
-                downloaded_ids.add(bid)
-                save_history(downloaded_ids)
+            else:
+                print(f"  [!] 上传失败: {upload_result.get('error', '?')}")
+                result["upload"] = upload_result
         else:
-            print(f"  [!] 下载失败，跳过")
+            upload_ok = True
+            success_count += 1
 
-        # 下载间隔，避免限流
-        if i < len(books_collected):
+        results.append(result)
+        if upload_ok:
+            downloaded_ids.add(bid)
+            save_history(downloaded_ids)
+
+        # 间隔
+        if i < len(books_to_download):
             delay = random.uniform(3, 8)
             print(f"  等待 {delay:.0f}s...")
             time.sleep(delay)
 
-    # Step 4: 清理临时文件
-    print(f"\n[4/4] 清理临时文件...")
+    # 清理
     for r in results:
         fp = r.get("filepath", "")
         if fp and os.path.exists(fp):
             os.remove(fp)
-            print(f"  [x] 删除: {r['filename']}")
 
-    # 输出结果
     summary = {
-        "date": date_str,
-        "keywords": keywords,
-        "total": len(books_collected),
-        "success": success_count,
-        "fail": len(books_collected) - success_count,
-        "total_size": total_size,
-        "human_size": human_size(total_size),
-        "books": [
-            {
-                "title": r.get("book", {}).get("title", r.get("filename", "")),
-                "filename": r.get("filename", ""),
-                "size": r.get("size", 0),
-                "upload": r.get("upload", {}).get("success", False),
-            }
-            for r in results
-        ],
+        "date": date_str, "keywords": keywords,
+        "total": len(books_to_download), "success": success_count,
+        "fail": len(books_to_download) - success_count,
+        "total_size": total_size, "human_size": human_size(total_size),
     }
 
     if args.json:
         print(f"\n{json.dumps(summary, ensure_ascii=False, indent=2)}")
     else:
         print(f"\n{'='*60}")
-        print(f"  下载完成: {summary['success']}/{summary['total']}")
-        print(f"  总大小: {summary['human_size']}")
-        print(f"  上传成功: {sum(1 for r in results if r.get('upload',{}).get('success'))}")
+        print(f"  完成: {summary['success']}/{summary['total']} | {summary['human_size']}")
         print(f"{'='*60}")
 
     save_history(downloaded_ids)
