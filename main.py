@@ -24,7 +24,6 @@ from pathlib import Path
 import requests
 
 import zlib_client
-import quark_upload
 
 # 项目根目录
 ROOT = Path(__file__).parent.resolve()
@@ -71,21 +70,69 @@ def select_keywords(args_keywords: str, config: dict) -> list[str]:
     return [keywords[idx]]
 
 
-def upload_file(local_path: str, cookie: str, folder: str = "zlib-github-books") -> dict:
-    """上传文件到夸克网盘"""
-    return quark_upload.upload_to_quark(
-        local_path, cookie=cookie, parent_fid="0", folder_name=folder,
+def upload_file(local_path: str, file_size: int) -> dict:
+    """用 aliyunpan CLI 上传文件到阿里云盘"""
+    import subprocess
+    filename = os.path.basename(local_path)
+
+    refresh_token = os.environ.get("ALIYUNDRIVE_REFRESH_TOKEN", "")
+    remote_dir = os.environ.get("ALIYUNDRIVE_PARENT_ID") or "zlib-github-books"
+
+    if not refresh_token:
+        return {"success": False, "error": "ALIYUNDRIVE_REFRESH_TOKEN not set"}
+
+    # 确保 aliyunpan 已安装
+    try:
+        subprocess.run(["aliyunpan", "version"], capture_output=True, timeout=10)
+    except FileNotFoundError:
+        print("  正在安装 aliyunpan CLI...")
+        install_cmd = (
+            "wget -q -O /tmp/aliyunpan.zip "
+            "https://github.com/tickstep/aliyunpan/releases/download/v0.3.7/"
+            "aliyunpan-v0.3.7-linux-amd64.zip && "
+            "unzip -q -o /tmp/aliyunpan.zip -d /tmp/aliyunpan && "
+            "cp /tmp/aliyunpan/aliyunpan-v0.3.7-linux-amd64/aliyunpan /usr/local/bin/ && "
+            "chmod +x /usr/local/bin/aliyunpan && "
+            "rm -rf /tmp/aliyunpan*"
+        )
+        r = subprocess.run(["bash", "-c", install_cmd], capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            return {"success": False, "error": f"安装失败: {r.stderr.strip()[:200]}"}
+        print("  安装完成")
+
+    # 登录
+    print(f"  登录阿里云盘...")
+    r = subprocess.run(
+        ["aliyunpan", "login", "-refresh-token", refresh_token],
+        capture_output=True, text=True, timeout=15,
     )
+    if r.returncode != 0:
+        return {"success": False, "error": f"登录失败: {(r.stderr or r.stdout).strip()[:200]}"}
+    print(f"  登录成功")
+
+    # 上传
+    print(f"  上传中 ({filename}, {file_size} bytes)...")
+    r = subprocess.run(
+        ["aliyunpan", "upload", local_path, remote_dir],
+        capture_output=True, text=True, timeout=600,
+    )
+    stdout = (r.stdout or "").strip()
+    stderr = (r.stderr or "").strip()
+
+    if r.returncode == 0:
+        print(f"  [✓] 上传完成")
+        return {"success": True, "file_name": filename, "size": file_size}
+    else:
+        return {"success": False, "error": f"上传失败: {(stderr or stdout)[:300]}"}
 
 
-def _check_upload_config() -> tuple[str, str]:
-    """检查上传配置，返回 (token/cookie, parent_id/folder)"""
-    cookie = os.environ.get("QUARK_COOKIE", "")
-    folder = os.environ.get("QUARK_FOLDER") or "zlib-github-books"
-    if not cookie:
-        print("ERROR: QUARK_COOKIE must be set for upload")
-        sys.exit(1)
-    return cookie, folder
+def _check_upload_config() -> bool:
+    """检查上传配置"""
+    token = os.environ.get("ALIYUNDRIVE_REFRESH_TOKEN", "")
+    if not token:
+        print("ERROR: ALIYUNDRIVE_REFRESH_TOKEN must be set for upload")
+        return False
+    return True
 
 
 def human_size(n: int) -> str:
@@ -119,13 +166,12 @@ def main():
         print("ERROR: ZLIB_EMAIL and ZLIB_PASSWORD must be set")
         sys.exit(1)
 
-    upload_cookie = ""
-    upload_folder = ""
+    upload_ready = False
     if upload_enabled:
-        try:
-            upload_cookie, upload_folder = _check_upload_config()
-        except SystemExit:
-            sys.exit(1)
+        if not _check_upload_config():
+            upload_enabled = False
+        else:
+            upload_ready = True
 
     # 已下载历史
     downloaded_ids = load_history()
@@ -225,12 +271,12 @@ def main():
             print(f"  [✓] 下载完成: {result['filename']} ({human_size(result['size'])})")
             total_size += result["size"]
 
-            # 上传夸克网盘
+            # 上传阿里云盘
             upload_ok = False
-            if upload_enabled:
-                print(f"  上传夸克网盘...")
+            if upload_ready:
+                print(f"  上传阿里云盘...")
                 upload_result = upload_file(
-                    result["filepath"], upload_cookie, upload_folder
+                    result["filepath"], result["size"]
                 )
                 if upload_result.get("success"):
                     rapid = " (秒传)" if upload_result.get("rapid_upload") else ""
