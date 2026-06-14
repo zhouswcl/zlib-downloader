@@ -47,10 +47,10 @@ def upload_via_relay(local_path: str) -> dict:
                 upload_url,
                 headers={"Authorization": f"Bearer {token}"},
                 files=files,
-                timeout=900,  # 15 min for large files (>30MB跨太平洋)
+                timeout=600,  # 10 min for upload
             )
     except requests.exceptions.Timeout:
-        return {"success": False, "error": "relay upload timed out (900s)"}
+        return {"success": False, "error": "relay upload timed out (600s)"}
     except requests.exceptions.ConnectionError as e:
         return {"success": False, "error": f"cannot connect to relay: {e}"}
     except Exception as e:
