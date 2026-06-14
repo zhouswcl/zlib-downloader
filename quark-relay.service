@@ -1,0 +1,15 @@
+[Unit]
+Description=Quark Relay - Upload files via Chinese IP to Quark Cloud
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/zlib-downloader
+ExecStart=/home/ubuntu/.hermes/hermes-agent/venv/bin/python /home/ubuntu/zlib-downloader/quark_relay.py
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/ubuntu/zlib-downloader/.relay.env
+
+[Install]
+WantedBy=multi-user.target

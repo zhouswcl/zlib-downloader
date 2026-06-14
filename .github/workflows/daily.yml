@@ -35,18 +35,12 @@ jobs:
           echo "ZLIB_HOME=/usr/local/bin" >> $GITHUB_ENV
           zlib version
 
-      - name: Debug cookie
-        run: |
-          echo "Cookie length: ${#QUARK_COOKIE} chars"
-          echo "Cookie prefix: ${QUARK_COOKIE:0:20}..."
-        env:
-          QUARK_COOKIE: ${{ secrets.QUARK_COOKIE }}
-
       - name: Run download script
         env:
           ZLIB_EMAIL: ${{ secrets.ZLIB_EMAIL }}
           ZLIB_PASSWORD: ${{ secrets.ZLIB_PASSWORD }}
-          QUARK_COOKIE: ${{ secrets.QUARK_COOKIE }}
+          RELAY_URL: ${{ secrets.RELAY_URL }}
+          RELAY_TOKEN: ${{ secrets.RELAY_TOKEN }}
         run: |
           ARGS=""
           if [ -n "${{ github.event.inputs.keywords }}" ]; then

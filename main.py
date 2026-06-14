@@ -4,12 +4,13 @@ Z-Library 每日图书下载器
 ========================
 完全通过 zlib (Go) CLI 操作，避免 Cloudflare 反爬。
 
-工作流: 登录 -> 搜索 -> 下载 -> 上传阿里云盘
+工作流: 登录 -> 搜索 -> 下载 -> 上传夸克网盘（通过腾讯云中转）
 
 环境变量:
   ZLIB_EMAIL                    Z-Library 邮箱
   ZLIB_PASSWORD                 Z-Library 密码
-  QUARK_COOKIE                  夸克网盘 Cookie
+  RELAY_URL                     中转服务器地址 (如 http://81.70.194.76:8099)
+  RELAY_TOKEN                   中转服务器鉴权 Token
 """
 import argparse
 import json
@@ -22,7 +23,7 @@ from pathlib import Path
 
 import requests
 
-import quark_upload
+import quark_relay_client
 import zlib_client
 
 ROOT = Path(__file__).parent.resolve()
@@ -64,17 +65,18 @@ def select_keywords(args_keywords: str, config: dict) -> list[str]:
 
 
 def upload_file(local_path: str, file_size: int) -> dict:
-    """用夸克网盘 API 上传文件"""
-    cookie = os.environ.get("QUARK_COOKIE", "")
-    if not cookie:
-        return {"success": False, "error": "QUARK_COOKIE not set"}
-    return quark_upload.upload_to_quark(local_path, cookie)
+    """通过腾讯云中转服务器上传到夸克网盘"""
+    return quark_relay_client.upload_via_relay(local_path)
 
 
 def _check_upload_config() -> bool:
-    token = os.environ.get("QUARK_COOKIE", "")
+    url = os.environ.get("RELAY_URL", "")
+    token = os.environ.get("RELAY_TOKEN", "")
+    if not url:
+        print("ERROR: RELAY_URL must be set for upload")
+        return False
     if not token:
-        print("ERROR: QUARK_COOKIE must be set for upload")
+        print("ERROR: RELAY_TOKEN must be set for upload")
         return False
     return True
 
