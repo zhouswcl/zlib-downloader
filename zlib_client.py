@@ -234,6 +234,38 @@ def _clean_pty_output(raw: str) -> str:
     return text.strip()[:200]
 
 
+def _extract_error(raw: str) -> str:
+    """从 PTY 输出中提取真正的错误信息"""
+    text = _strip_ansi(raw)
+    lines = text.split("\n")
+
+    # 收集所有可能包含错误信息的行（保留 500 行缓存）
+    error_lines = []
+    for line in lines:
+        sl = line.strip()
+        # 跳过 spinner 动画行（只包含 spinner 字符和 "Fetching"）
+        if sl and not sl.startswith("│") and not sl.startswith("╭") \
+           and not sl.startswith("╰") and not sl.startswith("├"):
+            # 跳过纯 spinner 行
+            if not any(c in sl for c in "⣽⣻⢿⡿⣟⣯⣷⣾"):
+                error_lines.append(sl)
+            elif "Error:" in sl or "error" in sl.lower() or "fail" in sl.lower():
+                error_lines.append(sl)
+
+    # 优先查找 "Error:" 行
+    for line in error_lines:
+        if "Error:" in line:
+            return line
+
+    # 查找最后几条非 spinner 行
+    meaningful = [l for l in error_lines if l and len(l) > 5]
+    if meaningful:
+        return meaningful[-1]
+
+    # 退回到截断输出（但扩大到 500 字符）
+    return text.strip()[:500]
+
+
 def download(book_id: str, dest_dir: str, timeout: int = 600) -> Optional[dict]:
     """下载图书到本地目录（通过 PTY 运行 zlib download）"""
     dest_dir = Path(dest_dir)
@@ -246,9 +278,38 @@ def download(book_id: str, dest_dir: str, timeout: int = 600) -> Optional[dict]:
     )
 
     summary = _clean_pty_output(raw_output)
+    error_detail = _extract_error(raw_output)
+
     if exit_code != 0:
         print(f"  [!] 下载命令返回退出码 {exit_code}")
-        print(f"  输出: {summary}")
+        print(f"  错误: {error_detail}")
+        # 尝试 fallback：不用 PTY，直接用 subprocess 跑（bubbletea 可能不支持 script）
+        print(f"  [!] 尝试备用下载方式 (直接子进程)...")
+        try:
+            result_direct = subprocess.run(
+                ["zlib", "download", book_id, "--dir", str(dest_dir)],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if result_direct.returncode == 0:
+                print(f"  [✓] 备用下载成功")
+                # 查找下载的文件
+                files = sorted(dest_dir.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True) if dest_dir.exists() else []
+                if files:
+                    newest = files[0]
+                    now = time.time()
+                    if now - newest.stat().st_mtime < 60:
+                        return {
+                            "filepath": str(newest),
+                            "filename": newest.name,
+                            "size": newest.stat().st_size,
+                            "book_id": book_id,
+                        }
+                print(f"  [!] 备用下载完成但找不到文件")
+                return None
+            else:
+                print(f"  [!] 备用方式也失败: {result_direct.stderr.strip()[:300]}")
+        except Exception as e2:
+            print(f"  [!] 备用方式异常: {e2}")
         return None
 
     print(f"  输出: {summary}")
