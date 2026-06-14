@@ -17,7 +17,6 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
-    environment: production
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,21 +35,18 @@ jobs:
           echo "ZLIB_HOME=/usr/local/bin" >> $GITHUB_ENV
           zlib version
 
-      - name: Install aliyunpan CLI
+      - name: Debug cookie
         run: |
-          wget -q -O /tmp/aliyunpan.zip \
-            https://github.com/tickstep/aliyunpan/releases/download/v0.3.9/aliyunpan-v0.3.9-linux-amd64.zip
-          unzip -q -o /tmp/aliyunpan.zip -d /tmp/aliyunpan
-          sudo cp /tmp/aliyunpan/aliyunpan-v0.3.9-linux-amd64/aliyunpan /usr/local/bin/
-          rm -rf /tmp/aliyunpan*
-          aliyunpan version
+          echo "Cookie length: ${#QUARK_COOKIE} chars"
+          echo "Cookie prefix: ${QUARK_COOKIE:0:20}..."
+        env:
+          QUARK_COOKIE: ${{ secrets.QUARK_COOKIE }}
 
       - name: Run download script
         env:
           ZLIB_EMAIL: ${{ secrets.ZLIB_EMAIL }}
           ZLIB_PASSWORD: ${{ secrets.ZLIB_PASSWORD }}
-          ALIYUNDRIVE_REFRESH_TOKEN: ${{ secrets.ALIYUNDRIVE_REFRESH_TOKEN }}
-          ALIYUNDRIVE_PARENT_ID: ${{ secrets.ALIYUNDRIVE_PARENT_ID }}
+          QUARK_COOKIE: ${{ secrets.QUARK_COOKIE }}
         run: |
           ARGS=""
           if [ -n "${{ github.event.inputs.keywords }}" ]; then

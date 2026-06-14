@@ -9,8 +9,7 @@ Z-Library 每日图书下载器
 环境变量:
   ZLIB_EMAIL                    Z-Library 邮箱
   ZLIB_PASSWORD                 Z-Library 密码
-  ALIYUNDRIVE_REFRESH_TOKEN     阿里云盘 refresh_token
-  ALIYUNDRIVE_PARENT_ID         阿里云盘上传目录 ID (默认 root)
+  QUARK_COOKIE                  夸克网盘 Cookie
 """
 import argparse
 import json
@@ -23,19 +22,14 @@ from pathlib import Path
 
 import requests
 
+import quark_upload
 import zlib_client
 
-# 项目根目录
 ROOT = Path(__file__).parent.resolve()
 DATA_DIR = ROOT / "data"
 DOWNLOAD_DIR = ROOT / "downloads"
 CONFIG_FILE = ROOT / "config.json"
 HISTORY_FILE = DATA_DIR / "downloaded_ids.json"
-
-# Aliyun Drive API
-ALIYUN_TOKEN_URL = "https://api.aliyundrive.com/v2/account/token"
-ALIYUN_CREATE_URL = "https://api.aliyundrive.com/v2/file/create"
-ALIYUN_COMPLETE_URL = "https://api.aliyundrive.com/v2/file/complete"
 
 
 def load_config() -> dict:
@@ -64,83 +58,23 @@ def select_keywords(args_keywords: str, config: dict) -> list[str]:
     if not keywords:
         return []
 
-    # 每天轮换一个关键词
     day_of_year = datetime.now().timetuple().tm_yday
     idx = day_of_year % len(keywords)
     return [keywords[idx]]
 
 
 def upload_file(local_path: str, file_size: int) -> dict:
-    """用 aliyunpan CLI 上传文件到阿里云盘"""
-    import subprocess
-    filename = os.path.basename(local_path)
-
-    refresh_token = os.environ.get("ALIYUNDRIVE_REFRESH_TOKEN", "")
-    remote_dir = os.environ.get("ALIYUNDRIVE_PARENT_ID") or "/zlib-github-books"
-
-    if not refresh_token:
-        return {"success": False, "error": "ALIYUNDRIVE_REFRESH_TOKEN not set"}
-
-    # 确保 aliyunpan 已安装
-    try:
-        subprocess.run(["aliyunpan", "version"], capture_output=True, timeout=10)
-    except FileNotFoundError:
-        print("  正在安装 aliyunpan CLI...")
-        install_cmd = (
-            "wget -q -O /tmp/aliyunpan.zip "
-            "https://github.com/tickstep/aliyunpan/releases/download/v0.3.9/"
-            "aliyunpan-v0.3.9-linux-amd64.zip && "
-            "unzip -q -o /tmp/aliyunpan.zip -d /tmp/aliyunpan && "
-            "cp /tmp/aliyunpan/aliyunpan-v0.3.9-linux-amd64/aliyunpan /usr/local/bin/ && "
-            "chmod +x /usr/local/bin/aliyunpan && "
-            "rm -rf /tmp/aliyunpan*"
-        )
-        r = subprocess.run(["bash", "-c", install_cmd], capture_output=True, text=True, timeout=60)
-        if r.returncode != 0:
-            return {"success": False, "error": f"安装失败: {r.stderr.strip()[:200]}"}
-        print("  安装完成")
-
-    # 登录
-    print(f"  登录阿里云盘...")
-    r = subprocess.run(
-        ["aliyunpan", "login", "-refresh-token", refresh_token],
-        capture_output=True, text=True, timeout=15,
-    )
-    if r.returncode != 0:
-        return {"success": False, "error": f"登录失败: {(r.stderr or r.stdout).strip()[:200]}"}
-    print(f"  登录成功")
-
-    # 上传
-    print(f"  上传中 ({filename}, {file_size} bytes)...")
-    # --drive-id 指定网盘（如 resource=资源盘, backup=备份盘）
-    r = subprocess.run(
-        ["aliyunpan", "upload", "--drive-id", "resource", local_path, remote_dir],
-        capture_output=True, text=True, timeout=600,
-    )
-    stdout = (r.stdout or "").strip()
-    stderr = (r.stderr or "").strip()
-
-    if r.returncode == 0:
-        print(f"  [✓] 上传完成")
-        if stdout:
-            print(f"  aliyunpan: {stdout[:300]}")
-        # 列出目标目录确认
-        r2 = subprocess.run(
-            ["aliyunpan", "ls", remote_dir],
-            capture_output=True, text=True, timeout=15,
-        )
-        if r2.returncode == 0 and r2.stdout:
-            print(f"  目录内容:\n{r2.stdout.strip()[:300]}")
-        return {"success": True, "file_name": filename, "size": file_size}
-    else:
-        return {"success": False, "error": f"上传失败: {(stderr or stdout)[:300]}"}
+    """用夸克网盘 API 上传文件"""
+    cookie = os.environ.get("QUARK_COOKIE", "")
+    if not cookie:
+        return {"success": False, "error": "QUARK_COOKIE not set"}
+    return quark_upload.upload_to_quark(local_path, cookie)
 
 
 def _check_upload_config() -> bool:
-    """检查上传配置"""
-    token = os.environ.get("ALIYUNDRIVE_REFRESH_TOKEN", "")
+    token = os.environ.get("QUARK_COOKIE", "")
     if not token:
-        print("ERROR: ALIYUNDRIVE_REFRESH_TOKEN must be set for upload")
+        print("ERROR: QUARK_COOKIE must be set for upload")
         return False
     return True
 
@@ -168,7 +102,6 @@ def main():
 
     upload_enabled = args.upload and not args.skip_upload
 
-    # 环境变量
     zlib_email = os.environ.get("ZLIB_EMAIL", "")
     zlib_password = os.environ.get("ZLIB_PASSWORD", "")
 
@@ -183,7 +116,6 @@ def main():
         else:
             upload_ready = True
 
-    # 已下载历史
     downloaded_ids = load_history()
     results = []
     total_size = 0
@@ -258,7 +190,6 @@ def main():
 
     print(f"\n  将下载 {len(books_collected)} 本...")
 
-    # 下载目录
     date_str = datetime.now().strftime("%Y%m%d")
     dl_dir = DOWNLOAD_DIR / date_str
     dl_dir.mkdir(parents=True, exist_ok=True)
@@ -281,16 +212,12 @@ def main():
             print(f"  [✓] 下载完成: {result['filename']} ({human_size(result['size'])})")
             total_size += result["size"]
 
-            # 上传阿里云盘
             upload_ok = False
             if upload_ready:
-                print(f"  上传阿里云盘...")
-                upload_result = upload_file(
-                    result["filepath"], result["size"]
-                )
+                print(f"  上传夸克网盘...")
+                upload_result = upload_file(result["filepath"], result["size"])
                 if upload_result.get("success"):
-                    rapid = " (秒传)" if upload_result.get("rapid_upload") else ""
-                    print(f"  [✓] 上传成功{rapid}")
+                    print(f"  [✓] 上传成功")
                     result["upload"] = upload_result
                     upload_ok = True
                     success_count += 1
@@ -303,20 +230,18 @@ def main():
 
             results.append(result)
 
-            # 只有下载+上传都成功才记入历史
             if upload_ok:
                 downloaded_ids.add(bid)
                 save_history(downloaded_ids)
         else:
             print(f"  [!] 下载失败，跳过")
 
-        # 下载间隔
         if i < len(books_collected):
             delay = random.uniform(3, 8)
             print(f"  等待 {delay:.0f}s...")
             time.sleep(delay)
 
-    # 清理临时文件（只删除上传成功的文件）
+    # 清理临时文件
     if upload_enabled and results:
         print(f"\n[4/4] 清理临时文件...")
         cleaned = 0
@@ -334,7 +259,6 @@ def main():
     else:
         print(f"\n[4/4] 跳过清理（无下载文件）")
 
-    # 输出结果
     summary = {
         "date": date_str,
         "keywords": keywords,
