@@ -1,48 +1,53 @@
-name: Z-Library Daily Downloader
+name: Daily Z-Library Download
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: "30 2 * * *"
   workflow_dispatch:
     inputs:
       keywords:
-        description: '搜索关键词（逗号分隔）'
+        description: "搜索关键词 (逗号分隔)"
         required: false
-        default: ''
-      max-downloads:
-        description: '最多下载本数'
+        default: ""
+      max_downloads:
+        description: "最多下载本数"
         required: false
-        default: '10'
-
-concurrency:
-  group: zlib-downloader
-  cancel-in-progress: false
+        default: "3"
 
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-
+    environment: production
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: 安装依赖
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install zlib CLI
         run: |
-          pip install -r requirements.txt
+          curl -fsSL https://raw.githubusercontent.com/heartleo/zlib/main/install.sh | sudo sh
+          echo "ZLIB_HOME=/usr/local/bin" >> $GITHUB_ENV
+          zlib version
 
-      - name: 安装 zlib CLI
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/heartleo/zlib/main/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: 执行下载并上传
+      - name: Run download script
         env:
           ZLIB_EMAIL: ${{ secrets.ZLIB_EMAIL }}
           ZLIB_PASSWORD: ${{ secrets.ZLIB_PASSWORD }}
-          ALIYUNDRIVE_REFRESH_TOKEN: ${{ secrets.ALIYUNDRIVE_REFRESH_TOKEN }}
-          ALIYUNDRIVE_PARENT_ID: ${{ secrets.ALIYUNDRIVE_PARENT_ID }}
+          QUARK_COOKIE: ${{ secrets.QUARK_COOKIE }}
+          QUARK_FOLDER: ${{ secrets.QUARK_FOLDER }}
         run: |
-          python main.py --keywords "${{ inputs.keywords || '' }}" --max-downloads "${{ inputs.max-downloads || '10' }}" --json
+          ARGS=""
+          if [ -n "${{ github.event.inputs.keywords }}" ]; then
+            ARGS="$ARGS --keywords \"${{ github.event.inputs.keywords }}\""
+          fi
+          if [ -n "${{ github.event.inputs.max_downloads }}" ]; then
+            ARGS="$ARGS --max-downloads ${{ github.event.inputs.max_downloads }}"
+          fi
+          python main.py $ARGS --json
