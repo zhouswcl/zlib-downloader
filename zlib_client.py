@@ -56,78 +56,25 @@ def _run_zlib(*args: str, timeout: int = 120) -> str:
 
 
 def _run_zlib_in_pty(*args: str, timeout: int = 300) -> tuple[str, int]:
-    """在伪终端中运行 zlib CLI 命令（用于 bubbletea TUI 命令如 download）
-    
-    使用 Python pty 模块创建伪终端，避免 script 命令忽略 SIGTERM 的问题。
-    """
-    import os as _os
-    import pty as _pty
-    import select as _select
-
+    """在伪终端中运行 zlib CLI 命令（用于 bubbletea TUI 命令如 download）"""
     cmd = ["zlib"] + list(args)
-    
-    master_fd, slave_fd = _pty.openpty()
-    proc = subprocess.Popen(
-        cmd,
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        close_fds=True,
-        preexec_fn=lambda: _os.setsid(),  # 创建新的进程组
-    )
-    _os.close(slave_fd)
+    cmd_str = " ".join(cmd)
 
-    output = []
-    deadline = time.time() + timeout
-    killed = False
+    # 使用 script 建立 PTY，让 bubbletea 正常工作
+    script_cmd = ["script", "-qec", cmd_str, "/dev/null"]
 
     try:
-        while time.time() < deadline:
-            r, _, _ = _select.select([master_fd], [], [], 5.0)
-            if r:
-                try:
-                    data = _os.read(master_fd, 65536)
-                    if not data:
-                        break
-                    output.append(data)
-                except OSError:
-                    break
-            # 检查进程是否结束
-            ret = proc.poll()
-            if ret is not None:
-                break
-        else:
-            # 超时了
-            killed = True
-            # 先发 SIGTERM 给进程组
-            try:
-                _os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-            # 等 5 秒
-            time.sleep(5)
-            # 如果还没死，发 SIGKILL
-            try:
-                _os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-    finally:
-        _os.close(master_fd)
-
-    if killed:
+        result = subprocess.run(
+            script_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
         raise ZLibraryError(f"zlib {' '.join(args)} timed out ({timeout}s)")
 
-    raw = b"".join(output).decode("utf-8", errors="replace")
-    return_code = proc.returncode if proc.returncode is not None else -1
-    # zlib CLI 在某些环境下下载成功退出码却是 -1（信号中断），检查输出确认
-    if return_code != 0 and "Saved to:" in raw:
-        return_code = 0
-    return raw, return_code
+    # script 的输出包含 ANSI 转义码，需要清理
+    return result.stdout, result.returncode
 
 
 # ── Session 管理 ──────────────────────────────────
@@ -336,12 +283,6 @@ def download(book_id: str, dest_dir: str, timeout: int = 600) -> Optional[dict]:
     if exit_code != 0:
         print(f"  [!] 下载命令返回退出码 {exit_code}")
         print(f"  错误: {error_detail}")
-
-        # 检测 "no download URL available" — 这是 Z-Library 侧的问题，fallback 也没用
-        if "no download URL available" in error_detail.lower() or "no download" in error_detail.lower():
-            print(f"  [x] Z-Library 无此书的下载链接，跳过 fallback")
-            return None
-
         # 尝试 fallback：不用 PTY，直接用 subprocess 跑（bubbletea 可能不支持 script）
         print(f"  [!] 尝试备用下载方式 (直接子进程)...")
         try:
@@ -369,27 +310,6 @@ def download(book_id: str, dest_dir: str, timeout: int = 600) -> Optional[dict]:
                 print(f"  [!] 备用方式也失败: {result_direct.stderr.strip()[:300]}")
         except Exception as e2:
             print(f"  [!] 备用方式异常: {e2}")
-
-        # 第三层 fallback: Python 直接下载（用 zlib 的 cookie）
-        print(f"  [!] 尝试直接下载方式 (Python + Cookie)...")
-        try:
-            import direct_download
-            session = load_session()
-            domain = (session or {}).get("domain", "https://z-lib.sk")
-            result = direct_download.download_book(
-                book_id, domain, session or {}, dest_dir, timeout
-            )
-            if result:
-                return {
-                    **result,
-                    "book_id": book_id,
-                }
-            print(f"  [!] 直接下载也失败")
-        except ImportError:
-            print(f"  [!] direct_download 模块不可用")
-        except Exception as e3:
-            print(f"  [!] 直接下载异常: {e3}")
-
         return None
 
     print(f"  输出: {summary}")
