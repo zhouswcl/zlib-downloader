@@ -56,26 +56,75 @@ def _run_zlib(*args: str, timeout: int = 120) -> str:
 
 
 def _run_zlib_in_pty(*args: str, timeout: int = 300) -> tuple[str, int]:
-    """在伪终端中运行 zlib CLI 命令（用于 bubbletea TUI 命令如 download）"""
-    cmd = ["zlib"] + list(args)
-    cmd_str = " ".join(cmd)
+    """在伪终端中运行 zlib CLI 命令（用于 bubbletea TUI 命令如 download）
+    
+    使用 Python pty 模块创建伪终端，避免 script 命令忽略 SIGTERM 的问题。
+    """
+    import os as _os
+    import pty as _pty
+    import select as _select
 
-    # 使用 script 建立 PTY，让 bubbletea 正常工作
-    # 注意: script 会忽略 SIGTERM，必须在外面包 timeout 命令确保超时能生效
-    script_cmd = ["timeout", str(timeout), "script", "-qec", cmd_str, "/dev/null"]
+    cmd = ["zlib"] + list(args)
+    
+    master_fd, slave_fd = _pty.openpty()
+    proc = subprocess.Popen(
+        cmd,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+        preexec_fn=lambda: _os.setsid(),  # 创建新的进程组
+    )
+    _os.close(slave_fd)
+
+    output = []
+    deadline = time.time() + timeout
+    killed = False
 
     try:
-        result = subprocess.run(
-            script_cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout + 30,  # 给 timeout 命令额外 30s 处理时间
-        )
-    except subprocess.TimeoutExpired:
+        while time.time() < deadline:
+            r, _, _ = _select.select([master_fd], [], [], 5.0)
+            if r:
+                try:
+                    data = _os.read(master_fd, 65536)
+                    if not data:
+                        break
+                    output.append(data)
+                except OSError:
+                    break
+            # 检查进程是否结束
+            ret = proc.poll()
+            if ret is not None:
+                break
+        else:
+            # 超时了
+            killed = True
+            # 先发 SIGTERM 给进程组
+            try:
+                _os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            # 等 5 秒
+            time.sleep(5)
+            # 如果还没死，发 SIGKILL
+            try:
+                _os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+    finally:
+        _os.close(master_fd)
+
+    if killed:
         raise ZLibraryError(f"zlib {' '.join(args)} timed out ({timeout}s)")
 
-    # script 的输出包含 ANSI 转义码，需要清理
-    return result.stdout, result.returncode
+    raw = b"".join(output).decode("utf-8", errors="replace")
+    return_code = proc.returncode if proc.returncode is not None else -1
+    return raw, return_code
 
 
 # ── Session 管理 ──────────────────────────────────
