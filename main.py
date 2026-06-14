@@ -40,17 +40,27 @@ def load_config() -> dict:
         return json.load(f)
 
 
-def load_history() -> set:
+def load_history() -> tuple[set, set]:
+    """加载已下载记录，返回 (已下载的ID集合, 已下载的规范化书名集合)"""
+    ids = set()
+    titles = set()
     if HISTORY_FILE.exists():
-        with open(HISTORY_FILE) as f:
-            return set(json.load(f))
-    return set()
+        try:
+            data = json.load(open(HISTORY_FILE))
+            if isinstance(data, list):
+                ids = set(data)
+            elif isinstance(data, dict):
+                ids = set(data.get("ids", []))
+                titles = set(data.get("titles", []))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return ids, titles
 
 
-def save_history(book_ids: set):
+def save_history(book_ids: set, book_titles: set):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(HISTORY_FILE, "w") as f:
-        json.dump(list(book_ids), f)
+        json.dump({"ids": list(book_ids), "titles": list(book_titles)}, f)
 
 
 def select_keywords(args_keywords: str, config: dict) -> list[str]:
@@ -172,7 +182,7 @@ def main():
         else:
             upload_ready = True
 
-    downloaded_ids = load_history()
+    downloaded_ids, downloaded_titles = load_history()
     results = []
     total_size = 0
     success_count = 0
@@ -240,7 +250,8 @@ def main():
         print(f"  找到 {len(books)} 本")
         for b in books:
             bid = b.get("id", "")
-            if not bid or bid in downloaded_ids:
+            title_key = _normalize_title(b.get("title", ""))
+            if not bid or bid in downloaded_ids or title_key in downloaded_titles:
                 continue
             books_collected.append(b)
             if len(books_collected) >= max_downloads:
@@ -344,7 +355,8 @@ def main():
 
             if upload_ok:
                 downloaded_ids.add(bid)
-                save_history(downloaded_ids)
+                downloaded_titles.add(_normalize_title(book.get("title", "")))
+                save_history(downloaded_ids, downloaded_titles)
         else:
             print(f"  [!] 下载失败，跳过")
 
@@ -400,7 +412,7 @@ def main():
             print(f"  上传成功: {sum(1 for r in results if r.get('upload',{}).get('success'))}")
         print(f"{'='*60}")
 
-    save_history(downloaded_ids)
+    save_history(downloaded_ids, downloaded_titles)
     sys.exit(0 if success_count > 0 else 1)
 
 
