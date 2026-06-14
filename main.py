@@ -178,15 +178,26 @@ def upload_to_aliyundrive(
                 return {"success": False, "error": f"上传失败: HTTP {r5.status_code}"}
         elif part_list:
             print(f"  多分片上传 ({len(part_list)} 片)...")
+            upload_ok = True
             with open(local_path, "rb") as f:
                 for part in part_list:
                     u = part.get("upload_url", "")
                     n = part.get("part_number", 1)
                     if not u: continue
                     chunk = f.read(part.get("size", 0)) if n < len(part_list) else f.read()
-                    r5 = req.put(u, data=chunk, timeout=300)
-                    if r5.status_code not in (200, 201, 204):
-                        return {"success": False, "error": f"分片{n}失败: {r5.status_code}"}
+                    # 每片重试 3 次
+                    for attempt in range(3):
+                        try:
+                            r5 = req.put(u, data=chunk, timeout=600)
+                            if r5.status_code in (200, 201, 204):
+                                break
+                        except Exception as e:
+                            print(f"    分片{n} 重试 {attempt+1}/3 ({type(e).__name__})...")
+                            import time; time.sleep(5)
+                            if attempt == 2:
+                                upload_ok = False
+            if not upload_ok:
+                return {"success": False, "error": "分片上传失败（重试耗尽）"}
             upload_id = cr.get("upload_id", "")
             if cr.get("file_id") and upload_id:
                 req.post("https://api.aliyundrive.com/adrive/v2/file/complete", headers=hdrs, json={
