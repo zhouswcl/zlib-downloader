@@ -98,30 +98,35 @@ def upload_to_aliyundrive(
 
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    # Step 2: 尝试多个 API domain 创建文件
+    # Step 2: 尝试多个 API domain + parent_id 创建文件
+    # "root" 在某些账号中已失效，尝试空字符串作为后备
+    parent_ids_to_try = [parent_id, ""] if parent_id == "root" else [parent_id]
     api_domains = [
         "https://api.aliyundrive.com",
         "https://openapi.aliyundrive.com",
     ]
     create_data = None
     for domain in api_domains:
-        create_url = f"{domain}/v2/file/create"
-        try:
-            create_resp = req.post(create_url, headers=headers, json={
-                "drive_id": drive_id,
-                "name": filename,
-                "parent_file_id": parent_id,
-                "type": "file",
-                "size": file_size,
-                "check_name_mode": "auto_rename",
-            }, timeout=15)
-            if create_resp.status_code in (200, 201):
-                create_data = create_resp.json()
-                break
-            print(f"  [!] {domain}: HTTP {create_resp.status_code}: {create_resp.text[:100]}")
-        except Exception as e:
-            print(f"  [!] {domain}: 异常: {e}")
-            continue
+        for pid in parent_ids_to_try:
+            create_url = f"{domain}/v2/file/create"
+            try:
+                create_resp = req.post(create_url, headers=headers, json={
+                    "drive_id": drive_id,
+                    "name": filename,
+                    "parent_file_id": pid,
+                    "type": "file",
+                    "size": file_size,
+                    "check_name_mode": "auto_rename",
+                }, timeout=15)
+                if create_resp.status_code in (200, 201):
+                    create_data = create_resp.json()
+                    break
+                print(f"  [!] {domain} (parent={pid[:10]}...): HTTP {create_resp.status_code}: {create_resp.text[:100]}")
+            except Exception as e:
+                print(f"  [!] {domain} (parent={pid[:10]}...): 异常: {e}")
+                continue
+        if create_data:
+            break
 
     if not create_data:
         return {"success": False, "error": "所有 API domain 创建文件均失败"}
@@ -338,16 +343,23 @@ def main():
             print(f"  等待 {delay:.0f}s...")
             time.sleep(delay)
 
-    # 清理临时文件（上传成功后删除本地文件）
-    if upload_enabled:
+    # 清理临时文件（只删除上传成功的文件）
+    if upload_enabled and results:
         print(f"\n[4/4] 清理临时文件...")
+        cleaned = 0
         for r in results:
+            upload_ok = r.get("upload", {}).get("success", False)
             fp = r.get("filepath", "")
-            if fp and os.path.exists(fp):
+            if upload_ok and fp and os.path.exists(fp):
                 os.remove(fp)
                 print(f"  [x] 删除: {r['filename']}")
+                cleaned += 1
+        if cleaned == 0:
+            print(f"  无文件可清理（上传均失败，文件保留在 {dl_dir}）")
+    elif not upload_enabled:
+        print(f"\n[4/4] 跳过清理 (--skip-upload，文件保存在 {dl_dir})")
     else:
-        print(f"\n[4/4] 跳过清理 (--skip-upload，保留文件在 {dl_dir})")
+        print(f"\n[4/4] 跳过清理（无下载文件）")
 
     # 输出结果
     summary = {
