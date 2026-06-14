@@ -90,19 +90,25 @@ def upload_to_aliyundrive(
     if not has_aliyunpan:
         print("  正在安装 aliyunpan CLI...")
         r = subprocess.run(
-            ["sudo", "bash", "-c", "curl -fsSL -o /tmp/aliyunpan.zip https://github.com/tickstep/aliyunpan/releases/download/v0.3.9/aliyunpan-v0.3.9-linux-amd64.zip && cd /tmp && unzip -q aliyunpan.zip && sudo cp aliyunpan-v0.3.9-linux-amd64/aliyunpan /usr/local/bin/ && rm -rf /tmp/aliyunpan*"],
+            ["sudo", "bash", "-c", "wget -q -O /tmp/aliyunpan.zip https://github.com/tickstep/aliyunpan/releases/download/v0.3.7/aliyunpan-v0.3.7-linux-amd64.zip && cd /tmp && unzip -q aliyunpan.zip && sudo cp aliyunpan /usr/local/bin/ && rm -rf /tmp/aliyunpan* 2>/dev/null; which aliyunpan"],
             capture_output=True, text=True, timeout=60,
         )
         if r.returncode != 0:
             return {"success": False, "error": f"aliyunpan 安装失败: {r.stderr.strip()[:200]}"}
         print("  aliyunpan 安装完成")
 
-    # 用 aliyunpan 上传（通过环境变量传 token）
-    env = os.environ.copy()
-    env["ALIYUNPAN_REFRESH_TOKEN"] = refresh_token
+    # 登录阿里云盘
+    r = subprocess.run(
+        ["aliyunpan", "login", "-refreshToken", refresh_token],
+        capture_output=True, text=True, timeout=30,
+    )
+    if r.returncode != 0:
+        return {"success": False, "error": f"aliyunpan 登录失败: {r.stderr.strip()[:200]}"}
+
+    # 上传到 /zlib_books/ 目录
     result = subprocess.run(
-        ["aliyunpan", "upload", local_path, parent_id or "root"],
-        capture_output=True, text=True, timeout=600, env=env,
+        ["aliyunpan", "upload", local_path, parent_id],
+        capture_output=True, text=True, timeout=600,
     )
     if result.returncode != 0:
         return {"success": False, "error": f"aliyunpan 上传失败: {result.stderr.strip()[:200]}"}
@@ -137,7 +143,7 @@ def main():
     zlib_email = os.environ.get("ZLIB_EMAIL", "")
     zlib_password = os.environ.get("ZLIB_PASSWORD", "")
     aliyun_token = os.environ.get("ALIYUNDRIVE_REFRESH_TOKEN", "")
-    aliyun_parent = os.environ.get("ALIYUNDRIVE_PARENT_ID") or "bb3c46b71cff43ecb076b3333a53b632"
+    aliyun_parent = os.environ.get("ALIYUNDRIVE_PARENT_ID") or "zlib-github-books"
 
     if not zlib_email or not zlib_password:
         print("ERROR: ZLIB_EMAIL and ZLIB_PASSWORD must be set")
