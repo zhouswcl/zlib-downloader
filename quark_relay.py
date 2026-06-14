@@ -22,10 +22,12 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import tempfile
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from socketserver import ThreadingMixIn
 from urllib.parse import urlparse
 from typing import Optional
 
@@ -151,10 +153,10 @@ def quark_upload_file(cookie: str, local_path: str, filename: str, target_fid: s
             headers={**COMMON_HEADERS, "Cookie": cookie},
             files=files,
             data=data,
-            timeout=300,
+            timeout=600,  # 10 min for large files
         )
     except requests.exceptions.Timeout:
-        return {"success": False, "error": "upload request timed out (300s)"}
+        return {"success": False, "error": "upload request timed out (600s)"}
     except requests.exceptions.ConnectionError as e:
         return {"success": False, "error": f"connection error: {e}"}
 
@@ -174,6 +176,12 @@ def quark_upload_file(cookie: str, local_path: str, filename: str, target_fid: s
         return {"success": True, "file_name": filename, "size": file_size, "rapid_upload": True}
     else:
         return {"success": False, "error": f"upload failed: {resp.get('message', r.text[:200])}"}
+
+
+class ThreadingRelayServer(ThreadingMixIn, HTTPServer):
+    """多线程 HTTP 服务器，支持并发请求"""
+    allow_reuse_address = True
+    daemon_threads = True
 
 
 class RelayHandler(BaseHTTPRequestHandler):
@@ -225,6 +233,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             return self._send_json(400, {"success": False, "error": "missing boundary in Content-Type"})
 
         raw_body = self.rfile.read(content_length)
+        LOG_MSG = f"[relay] received {content_length} bytes"
+        print(LOG_MSG)
         boundary = content_type.split("boundary=")[1].strip()
 
         # 从 multipart 提取文件名和文件数据
@@ -332,7 +342,8 @@ def main():
     if not QUARK_COOKIE:
         print("WARNING: QUARK_COOKIE not set! Uploads will fail.")
 
-    server = HTTPServer(("0.0.0.0", port), RelayHandler)
+    server = ThreadingRelayServer(("0.0.0.0", port), RelayHandler)
+    server.socket.settimeout(600)  # 10 min socket timeout for large uploads
     print(f"\n{'='*50}")
     print(f"  夸克网盘中转服务器")
     print(f"  监听: 0.0.0.0:{port}")
