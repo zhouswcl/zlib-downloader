@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       keywords:
-        description: '搜索关键词（逗号分隔，留空则自动轮换）'
+        description: '搜索关键词（逗号分隔）'
         required: false
         default: ''
       max-downloads:
@@ -31,8 +31,12 @@ jobs:
 
       - name: 安装依赖
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: 安装 zlib CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/heartleo/zlib/main/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: 执行下载并上传
         env:
