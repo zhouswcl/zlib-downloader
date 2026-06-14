@@ -90,7 +90,7 @@ def upload_to_aliyundrive(
     if not has_aliyunpan:
         print("  正在安装 aliyunpan CLI...")
         r = subprocess.run(
-            ["sudo", "bash", "-c", "wget -q -O /tmp/aliyunpan.zip https://github.com/tickstep/aliyunpan/releases/download/v0.3.7/aliyunpan-v0.3.7-linux-amd64.zip && cd /tmp && unzip -q aliyunpan.zip && sudo cp aliyunpan /usr/local/bin/ && rm -rf /tmp/aliyunpan* 2>/dev/null; which aliyunpan"],
+            ["sudo", "bash", "-c", "wget -q -O /tmp/aliyunpan.zip https://github.com/tickstep/aliyunpan/releases/download/v0.3.7/aliyunpan-v0.3.7-linux-amd64.zip && cd /tmp && unzip -q aliyunpan.zip && sudo cp aliyunpan-v0.3.7-linux-amd64/aliyunpan /usr/local/bin/ && rm -rf /tmp/aliyunpan* 2>/dev/null; which aliyunpan"],
             capture_output=True, text=True, timeout=60,
         )
         if r.returncode != 0:
