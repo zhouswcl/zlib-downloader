@@ -97,18 +97,12 @@ def upload_to_aliyundrive(
             return {"success": False, "error": f"aliyunpan 安装失败: {r.stderr.strip()[:200]}"}
         print("  aliyunpan 安装完成")
 
-    # 用 aliyunpan 上传
-    # 先配置 refresh_token
-    r = subprocess.run(
-        ["aliyunpan", "config", "set", "--refresh-token", refresh_token],
-        capture_output=True, text=True, timeout=15,
-    )
-    if r.returncode != 0:
-        return {"success": False, "error": f"aliyunpan 配置失败: {r.stderr.strip()[:200]}"}
-
+    # 用 aliyunpan 上传（通过环境变量传 token）
+    env = os.environ.copy()
+    env["ALIYUNPAN_REFRESH_TOKEN"] = refresh_token
     result = subprocess.run(
         ["aliyunpan", "upload", local_path, parent_id or "root"],
-        capture_output=True, text=True, timeout=600,
+        capture_output=True, text=True, timeout=600, env=env,
     )
     if result.returncode != 0:
         return {"success": False, "error": f"aliyunpan 上传失败: {result.stderr.strip()[:200]}"}
