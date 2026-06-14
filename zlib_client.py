@@ -60,15 +60,16 @@ def _run_zlib_in_pty(*args: str, timeout: int = 300) -> tuple[str, int]:
     cmd = ["zlib"] + list(args)
     cmd_str = " ".join(cmd)
 
-    # 使用 script 建立 PTY，让 bubbletea 正常工作
-    script_cmd = ["script", "-qec", cmd_str, "/dev/null"]
+    # 使用 script 建立 PTY + timeout 防止 script 本身卡死
+    script_cmd = ["timeout", str(timeout), "script", "-qec", cmd_str, "/dev/null"]
+    effective_timeout = timeout + 30  # 给 script 和 timeout 之间留余量
 
     try:
         result = subprocess.run(
             script_cmd,
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=effective_timeout,
         )
     except subprocess.TimeoutExpired:
         raise ZLibraryError(f"zlib {' '.join(args)} timed out ({timeout}s)")
@@ -135,15 +136,6 @@ def _parse_search_table(output: str) -> list[dict]:
     clean = _strip_ansi(output)
     books = []
 
-    # 表格格式（来自 Go 源码）:
-    # ✓ Found 10 results · Page 1 / 3
-    #
-    # ╭─────┬──────┬──────────────────────────┬─────────────────┬──────┬────────┬──────────┬──────────╮
-    # │  #  │ ID   │ Title                    │ Authors         │ Year │ Format │ Size     │ Rating   │
-    # ├─────┼──────┼──────────────────────────┼─────────────────┼──────┼────────┼──────────┼──────────┤
-    # │  1  │ abcd │ The Go Programming Lang. │ Donovan & K.    │ 2015 │ EPUB   │ 2.5 MB   │ 4.5      │
-    # ╰─────┴──────┴──────────────────────────┴─────────────────┴──────┴────────┴──────────┴──────────╯
-
     lines = clean.split("\n")
     in_table = False
     in_header = False
@@ -199,10 +191,6 @@ def _parse_search_table(output: str) -> list[dict]:
                     "size": size,
                 })
 
-        # 表格结束
-        elif stripped.startswith("╰"):
-            break
-
     return books
 
 
@@ -247,14 +235,12 @@ def _extract_error(raw: str) -> str:
     text = _strip_ansi(raw)
     lines = text.split("\n")
 
-    # 收集所有可能包含错误信息的行（保留 500 行缓存）
+    # 收集所有可能包含错误信息的行
     error_lines = []
     for line in lines:
         sl = line.strip()
-        # 跳过 spinner 动画行（只包含 spinner 字符和 "Fetching"）
         if sl and not sl.startswith("│") and not sl.startswith("╭") \
            and not sl.startswith("╰") and not sl.startswith("├"):
-            # 跳过纯 spinner 行
             if not any(c in sl for c in "⣽⣻⢿⡿⣟⣯⣷⣾"):
                 error_lines.append(sl)
             elif "Error:" in sl or "error" in sl.lower() or "fail" in sl.lower():
@@ -270,11 +256,10 @@ def _extract_error(raw: str) -> str:
     if meaningful:
         return meaningful[-1]
 
-    # 退回到截断输出（但扩大到 500 字符）
     return text.strip()[:500]
 
 
-def download(book_id: str, dest_dir: str, timeout: int = 600) -> Optional[dict]:
+def download(book_id: str, dest_dir: str, timeout: int = 120) -> Optional[dict]:
     """下载图书到本地目录（通过 PTY 运行 zlib download）"""
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -291,7 +276,7 @@ def download(book_id: str, dest_dir: str, timeout: int = 600) -> Optional[dict]:
     if exit_code != 0:
         print(f"  [!] 下载命令返回退出码 {exit_code}")
         print(f"  错误: {error_detail}")
-        # 尝试 fallback：不用 PTY，直接用 subprocess 跑（bubbletea 可能不支持 script）
+        # 尝试 fallback：不用 PTY，直接用 subprocess 跑
         print(f"  [!] 尝试备用下载方式 (直接子进程)...")
         try:
             result_direct = subprocess.run(
@@ -300,7 +285,6 @@ def download(book_id: str, dest_dir: str, timeout: int = 600) -> Optional[dict]:
             )
             if result_direct.returncode == 0:
                 print(f"  [✓] 备用下载成功")
-                # 查找下载的文件
                 files = sorted(dest_dir.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True) if dest_dir.exists() else []
                 if files:
                     newest = files[0]
