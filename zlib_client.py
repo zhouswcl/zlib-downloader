@@ -109,11 +109,12 @@ class ZLibraryClient:
         if not self.logged_in:
             raise ZLibraryError("未登录")
 
-        targets = [self.domain] + [d for d in self.domains if d != self.domain]
+        # singlelogin.re 是登录门户，不能用于搜索
+        search_domains = [d for d in self.domains if "singlelogin" not in d]
+        targets = [self.domain] + [d for d in search_domains if d != self.domain]
 
         for domain in targets:
             try:
-                # 匹配 Go 客户端 URL: {domain}/s/{query}?&page=N
                 encoded = requests.utils.quote(query)
                 url = f"{domain}/s/{encoded}?&page={page}"
                 print(f"  搜索 URL: {url}")
@@ -121,33 +122,65 @@ class ZLibraryClient:
                     "Referer": f"{domain}/",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 })
+
+                # 503 重试一次
+                if resp.status_code == 503:
+                    print(f"  503 服务忙，等待 5 秒重试...")
+                    time.sleep(5)
+                    resp = self.session.get(url, timeout=30)
+                    if resp.status_code == 503:
+                        print(f"  仍返回 503，跳过 {domain}")
+                        continue
+
                 if resp.status_code != 200:
-                    print(f"  HTTP {resp.status_code}, 尝试下一个域名")
+                    print(f"  HTTP {resp.status_code}, 跳过 {domain}")
                     continue
 
-                books = self._parse_search_results(resp.text, domain)
+                html = resp.text
+
+                # 检测 JS 反爬挑战页面（z-lib.is 等）
+                challenge_url = self._detect_challenge(html)
+                if challenge_url:
+                    print(f"  检测到 JS 挑战，跟随重定向: {challenge_url}")
+                    resp2 = self.session.get(challenge_url, timeout=30)
+                    if resp2.status_code == 200:
+                        html = resp2.text
+
+                books = self._parse_search_results(html, domain)
                 if books:
                     return books[:count]
 
-                # 调试: 保存 HTML 片段到日志
-                snippet = resp.text[:2000].replace("\n", " ")[:300]
-                print(f"  页面加载成功但未解析到书，HTML 开头: {snippet}...")
-                print(f"  尝试备用搜索 URL 格式...")
+                snippet = re.sub(r'\s+', ' ', html[:1500])[:300]
+                print(f"  页面加载但未解析到书: {snippet}...")
 
-                # 备用: 尝试 /search/ 路径
+                # 备用: /search/ 路径
                 url2 = f"{domain}/search/{encoded}/?page={page}"
                 resp2 = self.session.get(url2, timeout=30)
                 if resp2.status_code == 200:
-                    books = self._parse_search_results(resp2.text, domain)
+                    html2 = resp2.text
+                    challenge2 = self._detect_challenge(html2)
+                    if challenge2:
+                        resp2 = self.session.get(challenge2, timeout=30)
+                        html2 = resp2.text
+                    books = self._parse_search_results(html2, domain)
                     if books:
                         return books[:count]
-                    snippet2 = resp2.text[:2000].replace("\n", " ")[:200]
-                    print(f"  备用格式也未解析到结果: {snippet2}...")
 
             except Exception as e:
                 print(f"[!] 搜索失败 ({domain}): {type(e).__name__}: {e}")
                 continue
         return []
+
+    def _detect_challenge(self, html: str) -> Optional[str]:
+        """检测 JS 反爬挑战页面，返回重定向 URL"""
+        m = re.search(r"redirect_link\s*=\s*'([^']+)'", html)
+        if m:
+            return m.group(1)
+        if "fingerprint" in html.lower() and "challenge" in html.lower():
+            m = re.search(r"window\.location\s*=\s*'([^']+)'", html)
+            if m:
+                return m.group(1)
+        return None
 
     def _parse_search_results(self, html: str, domain: str) -> list[dict]:
         """解析搜索结果的 HTML（多策略）"""
