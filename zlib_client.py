@@ -124,6 +124,9 @@ def _run_zlib_in_pty(*args: str, timeout: int = 300) -> tuple[str, int]:
 
     raw = b"".join(output).decode("utf-8", errors="replace")
     return_code = proc.returncode if proc.returncode is not None else -1
+    # zlib CLI 在某些环境下下载成功退出码却是 -1（信号中断），检查输出确认
+    if return_code != 0 and "Saved to:" in raw:
+        return_code = 0
     return raw, return_code
 
 
