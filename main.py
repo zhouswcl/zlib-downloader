@@ -75,23 +75,22 @@ def upload_to_aliyundrive(
     refresh_token: str,
     parent_id: str = "",
 ) -> dict:
-    """使用 rclone 上传文件到阿里云盘（自动安装最新版 rclone）"""
-    import os, subprocess, tempfile, sys
+    """使用 aliyunpan CLI 上传文件到阿里云盘"""
+    import os, subprocess, tempfile
     file_size = os.path.getsize(local_path)
     filename = os.path.basename(local_path)
 
-    # 检查 rclone 是否支持 aliyundrive，不支持的装最新版
+    # 检查 aliyunpan 是否已安装
     try:
-        r = subprocess.run(["rclone", "backends"], capture_output=True, text=True, timeout=10)
-        has_aliyun = "aliyundrive" in r.stdout
-    except FileNotFoundError:
-        has_aliyun = False
+        subprocess.run(["aliyunpan", "version"], capture_output=True, timeout=5)
+        has_aliyunpan = True
+    except (FileNotFoundError, Exception):
+        has_aliyunpan = False
 
-    rclone_cmd = "rclone"
-    if not has_aliyun:
-        print("  正在安装 aliyunpan CLI（阿里云盘专用工具）...")
+    if not has_aliyunpan:
+        print("  正在安装 aliyunpan CLI...")
         r = subprocess.run(
-            ["sudo", "bash", "-c", "curl -fsSL -o /tmp/aliyunpan.tar.gz https://github.com/tickstep/aliyunpan/releases/download/v0.3.9/aliyunpan-v0.3.9-linux-amd64.tar.gz && tar xzf /tmp/aliyunpan.tar.gz -C /tmp/ && sudo cp /tmp/aliyunpan-v0.3.9-linux-amd64/aliyunpan /usr/local/bin/ && rm -rf /tmp/aliyunpan*"],
+            ["sudo", "bash", "-c", "curl -fsSL -o /tmp/aliyunpan.zip https://github.com/tickstep/aliyunpan/releases/download/v0.3.9/aliyunpan-v0.3.9-linux-amd64.zip && cd /tmp && unzip -q aliyunpan.zip && sudo cp aliyunpan-v0.3.9-linux-amd64/aliyunpan /usr/local/bin/ && rm -rf /tmp/aliyunpan*"],
             capture_output=True, text=True, timeout=60,
         )
         if r.returncode != 0:
