@@ -113,7 +113,7 @@ def upload_file(local_path: str, file_size: int) -> dict:
     # 上传
     print(f"  上传中 ({filename}, {file_size} bytes)...")
     r = subprocess.run(
-        ["aliyunpan", "upload", "-drive", "resource", local_path, remote_dir],
+        ["aliyunpan", "upload", local_path, remote_dir],
         capture_output=True, text=True, timeout=600,
     )
     stdout = (r.stdout or "").strip()
@@ -121,6 +121,15 @@ def upload_file(local_path: str, file_size: int) -> dict:
 
     if r.returncode == 0:
         print(f"  [✓] 上传完成")
+        if stdout:
+            print(f"  aliyunpan: {stdout[:300]}")
+        # 列出目标目录确认
+        r2 = subprocess.run(
+            ["aliyunpan", "ls", remote_dir],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r2.returncode == 0 and r2.stdout:
+            print(f"  目录内容:\n{r2.stdout.strip()[:300]}")
         return {"success": True, "file_name": filename, "size": file_size}
     else:
         return {"success": False, "error": f"上传失败: {(stderr or stdout)[:300]}"}
