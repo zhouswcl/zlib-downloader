@@ -73,105 +73,55 @@ def select_keywords(args_keywords: str, config: dict) -> list[str]:
 def upload_to_aliyundrive(
     local_path: str,
     refresh_token: str,
-    parent_id: str = "root",
+    parent_id: str = "",
 ) -> dict:
-    """上传文件到阿里云盘"""
-    import requests as req
+    """使用 rclone 上传文件到阿里云盘（自动安装最新版 rclone）"""
+    import os, subprocess, tempfile, sys
     file_size = os.path.getsize(local_path)
     filename = os.path.basename(local_path)
 
-    # Step 1: refresh_token -> access_token
-    resp = req.post(ALIYUN_TOKEN_URL, json={
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-    })
-    if resp.status_code != 200:
-        return {"success": False, "error": f"token刷新失败: HTTP {resp.status_code}: {resp.text[:200]}"}
+    # 检查 rclone 是否支持 aliyundrive，不支持的装最新版
+    try:
+        r = subprocess.run(["rclone", "backends"], capture_output=True, text=True, timeout=10)
+        has_aliyun = "aliyundrive" in r.stdout
+    except FileNotFoundError:
+        has_aliyun = False
 
-    token_data = resp.json()
-    access_token = token_data.get("access_token", "")
-    drive_id = token_data.get("default_drive_id", "")
-    if not access_token:
-        return {"success": False, "error": f"未获取到 access_token: {token_data.get('message','?')}"}
-    if not drive_id:
-        return {"success": False, "error": "未获取到 drive_id"}
+    rclone_cmd = "rclone"
+    if not has_aliyun:
+        print("  正在安装最新版 rclone（含 aliyundrive 支持）...")
+        r = subprocess.run(
+            ["sudo", "bash", "-c", "curl -fsSL https://rclone.org/install.sh | bash"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if r.returncode != 0:
+            return {"success": False, "error": f"rclone 安装失败: {r.stderr.strip()[:200]}"}
+        print("  rclone 安装完成")
 
-    headers = {"Authorization": f"Bearer {access_token}"}
+    config_content = f"""[aliyun]
+type = aliyundrive
+token = {{"refresh_token":"{refresh_token}"}}
+root_folder_id = {parent_id or "root"}
+"""
+    config_path = os.path.join(tempfile.gettempdir(), f"rclone_aliyun_{os.getpid()}.conf")
+    try:
+        with open(config_path, "w") as f:
+            f.write(config_content)
 
-    # Step 2: 尝试多个 API domain + parent_id 创建文件
-    # "root" 在某些账号中已失效，尝试空字符串作为后备
-    parent_ids_to_try = [parent_id, ""] if parent_id == "root" else [parent_id]
-    api_domains = [
-        "https://api.aliyundrive.com",
-        "https://openapi.aliyundrive.com",
-    ]
-    create_data = None
-    for domain in api_domains:
-        for pid in parent_ids_to_try:
-            create_url = f"{domain}/v2/file/create"
-            try:
-                create_resp = req.post(create_url, headers=headers, json={
-                    "drive_id": drive_id,
-                    "name": filename,
-                    "parent_file_id": pid,
-                    "type": "file",
-                    "size": file_size,
-                    "check_name_mode": "auto_rename",
-                }, timeout=15)
-                if create_resp.status_code in (200, 201):
-                    create_data = create_resp.json()
-                    break
-                print(f"  [!] {domain} (parent={pid[:10]}...): HTTP {create_resp.status_code}: {create_resp.text[:100]}")
-            except Exception as e:
-                print(f"  [!] {domain} (parent={pid[:10]}...): 异常: {e}")
-                continue
-        if create_data:
-            break
-
-    if not create_data:
-        return {"success": False, "error": "所有 API domain 创建文件均失败"}
-
-    file_id = create_data.get("file_id", "")
-    upload_url = create_data.get("upload_url", "")
-    rapid_upload = create_data.get("rapid_upload", False)
-
-    if rapid_upload:
-        return {"success": True, "file_name": filename, "file_id": file_id, "rapid_upload": True}
-
-    # Step 3: 上传文件内容
-    if not upload_url:
-        part_info_list = create_data.get("part_info_list", [])
-        if part_info_list:
-            with open(local_path, "rb") as f:
-                for part in part_info_list:
-                    part_url = part.get("upload_url", "")
-                    part_number = part.get("part_number", 1)
-                    if not part_url:
-                        continue
-                    chunk = f.read(part.get("size", 0)) if part_number < len(part_info_list) else f.read()
-                    put_resp = req.put(part_url, data=chunk, timeout=300)
-                    if put_resp.status_code not in (200, 201, 204):
-                        return {"success": False, "error": f"分片{part_number}上传失败: HTTP {put_resp.status_code}"}
-
-            upload_id = create_data.get("upload_id", "")
-            if file_id and upload_id:
-                req.post(f"https://api.aliyundrive.com/v2/file/complete", headers=headers, json={
-                    "drive_id": drive_id,
-                    "file_id": file_id,
-                    "upload_id": upload_id,
-                }, timeout=15)
-        else:
-            return {"success": False, "error": f"无上传地址: {create_data}"}
-
-        return {"success": True, "file_name": filename, "file_id": file_id, "size": file_size}
-
-    # 单链接上传
-    with open(local_path, "rb") as f:
-        put_resp = req.put(upload_url, data=f, timeout=600)
-        if put_resp.status_code not in (200, 201, 204):
-            return {"success": False, "error": f"上传失败: HTTP {put_resp.status_code}"}
-
-    return {"success": True, "file_name": filename, "file_id": file_id, "size": file_size}
+        result = subprocess.run(
+            ["rclone", "--config", config_path, "copy", local_path, "aliyun:", "--progress"],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            return {"success": False, "error": f"rclone 上传失败: {result.stderr.strip()[:200]}"}
+        return {"success": True, "file_name": filename, "size": file_size}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "上传超时 (600s)"}
+    except Exception as e:
+        return {"success": False, "error": f"上传异常: {e}"}
+    finally:
+        if os.path.exists(config_path):
+            os.remove(config_path)
 
 
 def human_size(n: int) -> str:
