@@ -76,7 +76,7 @@ def upload_file(local_path: str, file_size: int) -> dict:
     filename = os.path.basename(local_path)
 
     refresh_token = os.environ.get("ALIYUNDRIVE_REFRESH_TOKEN", "")
-    remote_dir = os.environ.get("ALIYUNDRIVE_PARENT_ID") or "zlib-github-books"
+    remote_dir = os.environ.get("ALIYUNDRIVE_PARENT_ID") or "/zlib-github-books"
 
     if not refresh_token:
         return {"success": False, "error": "ALIYUNDRIVE_REFRESH_TOKEN not set"}
