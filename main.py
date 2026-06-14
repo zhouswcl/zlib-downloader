@@ -159,56 +159,83 @@ def upload_to_aliyundrive(
         # 分片上传
         upload_url = cr.get("upload_url", "")
         part_list = cr.get("part_info_list", [])
-        if upload_url:
-            print(f"  单链接上传...")
-            # 重试 3 次，每次 300s
-            for attempt in range(3):
+        file_id = cr.get("file_id", "")
+        upload_id = cr.get("upload_id", "")
+
+        def refresh_upload_url(part_number: int) -> str:
+            nonlocal part_list
+            r = req.post("https://api.aliyundrive.com/adrive/v2/file/get_upload_url", headers=hdrs, json={
+                "drive_id": did, "file_id": file_id, "upload_id": upload_id,
+                "part_info_list": [{"part_number": part_number}],
+            }, timeout=15)
+            if r.status_code == 200:
+                new_list = r.json().get("part_info_list", [])
+                if new_list:
+                    part_list = new_list
+                    return new_list[0].get("upload_url", "")
+            return ""
+
+        def upload_part(data: bytes, url: str, part_number: int, max_retries=3) -> bool:
+            for attempt in range(max_retries):
                 try:
-                    with open(local_path, "rb") as f:
-                        r5 = req.put(upload_url, data=f, timeout=600)
-                    if r5.status_code in (200, 201, 204):
-                        break
-                    print(f"  重试 {attempt+1}/3 (HTTP {r5.status_code})...")
-                except Exception as e:
-                    print(f"  重试 {attempt+1}/3 ({e})...")
-                    if attempt == 2:
-                        return {"success": False, "error": f"上传失败(3次重试): {e}"}
-                    import time; time.sleep(5)
-            else:
-                return {"success": False, "error": f"上传失败: HTTP {r5.status_code}"}
-        elif part_list:
-            print(f"  多分片上传 ({len(part_list)} 片)...")
-            upload_ok = True
-            with open(local_path, "rb") as f:
-                for part in part_list:
-                    u = part.get("upload_url", "")
-                    n = part.get("part_number", 1)
-                    if not u: continue
-                    chunk = f.read(part.get("size", 0)) if n < len(part_list) else f.read()
-                    # 每片重试 3 次
-                    for attempt in range(3):
+                    r = req.put(url, data=data, timeout=600)
+                    if r.status_code in (200, 201, 204):
+                        return True
+                    if r.status_code == 403:
                         try:
-                            r5 = req.put(u, data=chunk, timeout=600)
-                            if r5.status_code in (200, 201, 204):
-                                break
-                        except Exception as e:
-                            print(f"    分片{n} 重试 {attempt+1}/3 ({type(e).__name__})...")
-                            import time; time.sleep(5)
-                            if attempt == 2:
-                                upload_ok = False
-            if not upload_ok:
-                return {"success": False, "error": "分片上传失败（重试耗尽）"}
-            upload_id = cr.get("upload_id", "")
-            if cr.get("file_id") and upload_id:
+                            j = r.json()
+                            if j.get("code") == "AccessDenied" and "expired" in j.get("message", ""):
+                                print("    URL expired, refreshing...")
+                                new_url = refresh_upload_url(part_number)
+                                if new_url:
+                                    url = new_url
+                                    continue
+                        except:
+                            pass
+                except (req.exceptions.ConnectionError, req.exceptions.Timeout) as e:
+                    print(f"    part{part_number} retry {attempt+1}/{max_retries}: {type(e).__name__}")
+                    import time; time.sleep(5)
+                    if attempt == max_retries - 1:
+                        new_url = refresh_upload_url(part_number)
+                        if new_url:
+                            url = new_url
+                except Exception as e:
+                    print(f"    part{part_number} error: {e}")
+                    return False
+            return False
+
+        if upload_url or part_list:
+            if upload_url:
+                parts = [(upload_url, 1, open(local_path, "rb").read())]
+            else:
+                print(f"  multipart upload ({len(part_list)} parts)...")
+                parts = [(p["upload_url"], p["part_number"],
+                         b"") for p in part_list]
+                with open(local_path, "rb") as f:
+                    for i, (_, n, _) in enumerate(parts):
+                        size = part_list[i].get("size", 0)
+                        chunk = f.read(size) if n < len(part_list) else f.read()
+                        parts[i] = (part_list[i]["upload_url"], n, chunk)
+
+            all_ok = True
+            for url, n, chunk in parts:
+                if not upload_part(chunk, url, n):
+                    print(f"  part {n} FAILED")
+                    all_ok = False
+                    break
+
+            if all_ok and upload_id and file_id:
                 req.post("https://api.aliyundrive.com/adrive/v2/file/complete", headers=hdrs, json={
-                    "drive_id": did, "file_id": cr["file_id"], "upload_id": upload_id,
+                    "drive_id": did, "file_id": file_id, "upload_id": upload_id,
                 }, timeout=15)
-        else:
-            return {"success": False, "error": f"无上传方式: {cr}"}
 
-        return {"success": True, "file_name": filename, "size": file_size}
+            if all_ok:
+                return {"success": True, "file_name": filename, "size": file_size}
+            return {"success": False, "error": "upload failed after all retries"}
 
-    return {"success": False, "error": f"列目录失败: {r2.text[:200]}"}
+        return {"success": False, "error": f"no upload method: {cr}"}
+
+    return {"success": False, "error": f"list dir failed: {r2.text[:200]}"}
 
 
 def human_size(n: int) -> str:
