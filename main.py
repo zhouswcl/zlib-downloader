@@ -76,70 +76,97 @@ def upload_to_aliyundrive(
     parent_id: str = "root",
 ) -> dict:
     """上传文件到阿里云盘"""
-    # Step 1: refresh_token -> access_token
-    resp = requests.post(ALIYUN_TOKEN_URL, json={
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-    })
-    resp.raise_for_status()
-    token_data = resp.json()
-    access_token = token_data["access_token"]
-    drive_id = token_data["default_drive_id"]
-
-    headers = {"Authorization": f"Bearer {access_token}"}
+    import requests as req
     file_size = os.path.getsize(local_path)
     filename = os.path.basename(local_path)
 
-    # Step 2: 创建文件记录
-    create_resp = requests.post(ALIYUN_CREATE_URL, headers=headers, json={
-        "drive_id": drive_id,
-        "name": filename,
-        "parent_file_id": parent_id,
-        "type": "file",
-        "size": file_size,
-        "check_name_mode": "auto_rename",
+    # Step 1: refresh_token -> access_token
+    resp = req.post(ALIYUN_TOKEN_URL, json={
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
     })
-    create_resp.raise_for_status()
-    create_data = create_resp.json()
+    if resp.status_code != 200:
+        return {"success": False, "error": f"token刷新失败: HTTP {resp.status_code}: {resp.text[:200]}"}
 
-    if create_data.get("rapid_upload"):
-        return {
-            "success": True,
-            "file_name": filename,
-            "file_id": create_data.get("file_id", ""),
-            "rapid_upload": True,
-        }
+    token_data = resp.json()
+    access_token = token_data.get("access_token", "")
+    drive_id = token_data.get("default_drive_id", "")
+    if not access_token:
+        return {"success": False, "error": f"未获取到 access_token: {token_data.get('message','?')}"}
+    if not drive_id:
+        return {"success": False, "error": "未获取到 drive_id"}
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    # Step 2: 尝试多个 API domain 创建文件
+    api_domains = [
+        "https://api.aliyundrive.com",
+        "https://openapi.aliyundrive.com",
+    ]
+    create_data = None
+    for domain in api_domains:
+        create_url = f"{domain}/v2/file/create"
+        try:
+            create_resp = req.post(create_url, headers=headers, json={
+                "drive_id": drive_id,
+                "name": filename,
+                "parent_file_id": parent_id,
+                "type": "file",
+                "size": file_size,
+                "check_name_mode": "auto_rename",
+            }, timeout=15)
+            if create_resp.status_code in (200, 201):
+                create_data = create_resp.json()
+                break
+            print(f"  [!] {domain}: HTTP {create_resp.status_code}: {create_resp.text[:100]}")
+        except Exception as e:
+            print(f"  [!] {domain}: 异常: {e}")
+            continue
+
+    if not create_data:
+        return {"success": False, "error": "所有 API domain 创建文件均失败"}
+
+    file_id = create_data.get("file_id", "")
+    upload_url = create_data.get("upload_url", "")
+    rapid_upload = create_data.get("rapid_upload", False)
+
+    if rapid_upload:
+        return {"success": True, "file_name": filename, "file_id": file_id, "rapid_upload": True}
 
     # Step 3: 上传文件内容
-    upload_url = (
-        create_data.get("part_info_list", [{}])[0].get("upload_url", "")
-        or create_data.get("upload_url", "")
-    )
     if not upload_url:
-        return {"success": False, "error": "无上传 URL"}
+        part_info_list = create_data.get("part_info_list", [])
+        if part_info_list:
+            with open(local_path, "rb") as f:
+                for part in part_info_list:
+                    part_url = part.get("upload_url", "")
+                    part_number = part.get("part_number", 1)
+                    if not part_url:
+                        continue
+                    chunk = f.read(part.get("size", 0)) if part_number < len(part_info_list) else f.read()
+                    put_resp = req.put(part_url, data=chunk, timeout=300)
+                    if put_resp.status_code not in (200, 201, 204):
+                        return {"success": False, "error": f"分片{part_number}上传失败: HTTP {put_resp.status_code}"}
 
+            upload_id = create_data.get("upload_id", "")
+            if file_id and upload_id:
+                req.post(f"https://api.aliyundrive.com/v2/file/complete", headers=headers, json={
+                    "drive_id": drive_id,
+                    "file_id": file_id,
+                    "upload_id": upload_id,
+                }, timeout=15)
+        else:
+            return {"success": False, "error": f"无上传地址: {create_data}"}
+
+        return {"success": True, "file_name": filename, "file_id": file_id, "size": file_size}
+
+    # 单链接上传
     with open(local_path, "rb") as f:
-        upload_resp = requests.put(upload_url, data=f)
-        if upload_resp.status_code not in (200, 201):
-            return {
-                "success": False,
-                "error": f"上传失败: HTTP {upload_resp.status_code}",
-            }
+        put_resp = req.put(upload_url, data=f, timeout=600)
+        if put_resp.status_code not in (200, 201, 204):
+            return {"success": False, "error": f"上传失败: HTTP {put_resp.status_code}"}
 
-    # Step 4: 完成上传
-    file_id = create_data.get("file_id", "")
-    if file_id:
-        requests.post(ALIYUN_COMPLETE_URL, headers=headers, json={
-            "drive_id": drive_id,
-            "file_id": file_id,
-        })
-
-    return {
-        "success": True,
-        "file_name": filename,
-        "file_id": file_id,
-        "size": file_size,
-    }
+    return {"success": True, "file_name": filename, "file_id": file_id, "size": file_size}
 
 
 def human_size(n: int) -> str:
