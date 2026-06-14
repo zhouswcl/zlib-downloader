@@ -24,6 +24,7 @@ from pathlib import Path
 import requests
 
 import zlib_client
+import quark_upload
 
 # 项目根目录
 ROOT = Path(__file__).parent.resolve()
@@ -70,172 +71,21 @@ def select_keywords(args_keywords: str, config: dict) -> list[str]:
     return [keywords[idx]]
 
 
-def upload_to_aliyundrive(
-    local_path: str,
-    refresh_token: str,
-    parent_id: str = "",
-) -> dict:
-    """使用 aliyunpan CLI 上传文件到阿里云盘"""
-    import os, subprocess, tempfile
-    file_size = os.path.getsize(local_path)
-    filename = os.path.basename(local_path)
+def upload_file(local_path: str, cookie: str, folder: str = "zlib-github-books") -> dict:
+    """上传文件到夸克网盘"""
+    return quark_upload.upload_to_quark(
+        local_path, cookie=cookie, parent_fid="0", folder_name=folder,
+    )
 
-    # 检查 aliyunpan 是否已安装
-    try:
-        subprocess.run(["aliyunpan", "version"], capture_output=True, timeout=5)
-        has_aliyunpan = True
-    except (FileNotFoundError, Exception):
-        has_aliyunpan = False
 
-    if not has_aliyunpan:
-        print("  正在安装 aliyunpan CLI...")
-        r = subprocess.run(
-            ["sudo", "bash", "-c", "wget -q -O /tmp/aliyunpan.zip https://github.com/tickstep/aliyunpan/releases/download/v0.3.7/aliyunpan-v0.3.7-linux-amd64.zip && cd /tmp && unzip -q aliyunpan.zip && sudo cp aliyunpan-v0.3.7-linux-amd64/aliyunpan /usr/local/bin/ && rm -rf /tmp/aliyunpan* 2>/dev/null; which aliyunpan"],
-            capture_output=True, text=True, timeout=60,
-        )
-        if r.returncode != 0:
-            return {"success": False, "error": f"aliyunpan 安装失败: {r.stderr.strip()[:200]}"}
-        print("  aliyunpan 安装完成")
-
-    # 用阿里云盘 API 上传（带详细调试输出）
-    import requests as req
-    print(f"  刷新 token...")
-    r = req.post("https://api.aliyundrive.com/v2/account/token", json={
-        "grant_type": "refresh_token", "refresh_token": refresh_token,
-    }, timeout=15)
-    if r.status_code != 200:
-        return {"success": False, "error": f"token失败: {r.status_code}: {r.text[:200]}"}
-    tok = r.json()
-    at = tok.get("access_token", "")
-    did = tok.get("default_drive_id", "")
-    print(f"  drive_id={did}, access_token OK")
-
-    hdrs = {"Authorization": f"Bearer {at}"}
-
-    # 先列出根目录，确认能访问
-    r2 = req.post("https://api.aliyundrive.com/adrive/v2/file/list", headers=hdrs, json={
-        "drive_id": did, "parent_file_id": "root", "limit": 5,
-    }, timeout=15)
-    print(f"  列目录: HTTP {r2.status_code} {r2.text[:200]}")
-
-    if r2.status_code == 200:
-        items = r2.json().get("items", [])
-        for item in items:
-            print(f"    {item['name']}: {item['file_id']} ({item['type']})")
-
-        # 找 zlib-github-books 文件夹
-        folder_id = None
-        for item in items:
-            if item["type"] == "folder" and "zlib" in item["name"].lower():
-                folder_id = item["file_id"]
-                print(f"  找到目标文件夹: {item['name']} -> {folder_id}")
-                break
-        if not folder_id:
-            print("  目标文件夹不存在，尝试创建...")
-            r3 = req.post("https://api.aliyundrive.com/adrive/v2/file/create", headers=hdrs, json={
-                "drive_id": did, "name": "zlib-github-books", "parent_file_id": "root",
-                "type": "folder", "check_name_mode": "auto_rename",
-            }, timeout=15)
-            if r3.status_code in (200, 201):
-                folder_id = r3.json().get("file_id", "")
-                print(f"  已创建: {folder_id}")
-            else:
-                return {"success": False, "error": f"创建文件夹失败: {r3.status_code}: {r3.text[:200]}"}
-
-        # 上传文件
-        print(f"  创建文件记录...")
-        r4 = req.post("https://api.aliyundrive.com/adrive/v2/file/create", headers=hdrs, json={
-            "drive_id": did, "name": filename,
-            "parent_file_id": folder_id,
-            "type": "file", "size": file_size,
-            "check_name_mode": "auto_rename",
-        }, timeout=15)
-        if r4.status_code not in (200, 201):
-            return {"success": False, "error": f"创建文件记录失败: {r4.status_code}: {r4.text[:200]}"}
-        cr = r4.json()
-        if cr.get("rapid_upload"):
-            return {"success": True, "file_name": filename, "size": file_size, "rapid_upload": True}
-
-        # 分片上传
-        upload_url = cr.get("upload_url", "")
-        part_list = cr.get("part_info_list", [])
-        file_id = cr.get("file_id", "")
-        upload_id = cr.get("upload_id", "")
-
-        def refresh_upload_url(part_number: int) -> str:
-            nonlocal part_list
-            r = req.post("https://api.aliyundrive.com/adrive/v2/file/get_upload_url", headers=hdrs, json={
-                "drive_id": did, "file_id": file_id, "upload_id": upload_id,
-                "part_info_list": [{"part_number": part_number}],
-            }, timeout=15)
-            if r.status_code == 200:
-                new_list = r.json().get("part_info_list", [])
-                if new_list:
-                    part_list = new_list
-                    return new_list[0].get("upload_url", "")
-            return ""
-
-        def upload_part(data: bytes, url: str, part_number: int, max_retries=3) -> bool:
-            for attempt in range(max_retries):
-                try:
-                    r = req.put(url, data=data, timeout=600)
-                    if r.status_code in (200, 201, 204):
-                        return True
-                    if r.status_code == 403:
-                        try:
-                            j = r.json()
-                            if j.get("code") == "AccessDenied" and "expired" in j.get("message", ""):
-                                print("    URL expired, refreshing...")
-                                new_url = refresh_upload_url(part_number)
-                                if new_url:
-                                    url = new_url
-                                    continue
-                        except:
-                            pass
-                except (req.exceptions.ConnectionError, req.exceptions.Timeout) as e:
-                    print(f"    part{part_number} retry {attempt+1}/{max_retries}: {type(e).__name__}")
-                    import time; time.sleep(5)
-                    if attempt == max_retries - 1:
-                        new_url = refresh_upload_url(part_number)
-                        if new_url:
-                            url = new_url
-                except Exception as e:
-                    print(f"    part{part_number} error: {e}")
-                    return False
-            return False
-
-        if upload_url or part_list:
-            if upload_url:
-                parts = [(upload_url, 1, open(local_path, "rb").read())]
-            else:
-                print(f"  multipart upload ({len(part_list)} parts)...")
-                parts = [(p["upload_url"], p["part_number"],
-                         b"") for p in part_list]
-                with open(local_path, "rb") as f:
-                    for i, (_, n, _) in enumerate(parts):
-                        size = part_list[i].get("size", 0)
-                        chunk = f.read(size) if n < len(part_list) else f.read()
-                        parts[i] = (part_list[i]["upload_url"], n, chunk)
-
-            all_ok = True
-            for url, n, chunk in parts:
-                if not upload_part(chunk, url, n):
-                    print(f"  part {n} FAILED")
-                    all_ok = False
-                    break
-
-            if all_ok and upload_id and file_id:
-                req.post("https://api.aliyundrive.com/adrive/v2/file/complete", headers=hdrs, json={
-                    "drive_id": did, "file_id": file_id, "upload_id": upload_id,
-                }, timeout=15)
-
-            if all_ok:
-                return {"success": True, "file_name": filename, "size": file_size}
-            return {"success": False, "error": "upload failed after all retries"}
-
-        return {"success": False, "error": f"no upload method: {cr}"}
-
-    return {"success": False, "error": f"list dir failed: {r2.text[:200]}"}
+def _check_upload_config() -> tuple[str, str]:
+    """检查上传配置，返回 (token/cookie, parent_id/folder)"""
+    cookie = os.environ.get("QUARK_COOKIE", "")
+    folder = os.environ.get("QUARK_FOLDER") or "zlib-github-books"
+    if not cookie:
+        print("ERROR: QUARK_COOKIE must be set for upload")
+        sys.exit(1)
+    return cookie, folder
 
 
 def human_size(n: int) -> str:
@@ -264,15 +114,18 @@ def main():
     # 环境变量
     zlib_email = os.environ.get("ZLIB_EMAIL", "")
     zlib_password = os.environ.get("ZLIB_PASSWORD", "")
-    aliyun_token = os.environ.get("ALIYUNDRIVE_REFRESH_TOKEN", "")
-    aliyun_parent = os.environ.get("ALIYUNDRIVE_PARENT_ID") or "zlib-github-books"
 
     if not zlib_email or not zlib_password:
         print("ERROR: ZLIB_EMAIL and ZLIB_PASSWORD must be set")
         sys.exit(1)
-    if upload_enabled and not aliyun_token:
-        print("ERROR: ALIYUNDRIVE_REFRESH_TOKEN must be set for upload")
-        sys.exit(1)
+
+    upload_cookie = ""
+    upload_folder = ""
+    if upload_enabled:
+        try:
+            upload_cookie, upload_folder = _check_upload_config()
+        except SystemExit:
+            sys.exit(1)
 
     # 已下载历史
     downloaded_ids = load_history()
@@ -372,12 +225,12 @@ def main():
             print(f"  [✓] 下载完成: {result['filename']} ({human_size(result['size'])})")
             total_size += result["size"]
 
-            # 上传阿里云盘
+            # 上传夸克网盘
             upload_ok = False
             if upload_enabled:
-                print(f"  上传阿里云盘...")
-                upload_result = upload_to_aliyundrive(
-                    result["filepath"], aliyun_token, aliyun_parent
+                print(f"  上传夸克网盘...")
+                upload_result = upload_file(
+                    result["filepath"], upload_cookie, upload_folder
                 )
                 if upload_result.get("success"):
                     rapid = " (秒传)" if upload_result.get("rapid_upload") else ""
