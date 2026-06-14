@@ -113,7 +113,7 @@ def upload_file(local_path: str, file_size: int) -> dict:
     # 上传
     print(f"  上传中 ({filename}, {file_size} bytes)...")
     r = subprocess.run(
-        ["aliyunpan", "upload", "-drive", "backup", local_path, remote_dir],
+        ["aliyunpan", "upload", "-drive", "resource", local_path, remote_dir],
         capture_output=True, text=True, timeout=600,
     )
     stdout = (r.stdout or "").strip()
