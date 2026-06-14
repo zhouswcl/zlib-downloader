@@ -225,21 +225,12 @@ def main():
 
             upload_ok = False
             if upload_ready:
-                print(f"  通过中转上传阿里云盘...")
+                print(f"  上传夸克网盘...")
                 upload_result = upload_file(result["filepath"], result["size"])
                 if upload_result.get("success"):
                     print(f"  [✓] 上传成功")
                     result["upload"] = upload_result
                     upload_ok = True
-                    success_count += 1
-                elif "timed out" in (upload_result.get("error", "")).lower() or \
-                     "connection aborted" in (upload_result.get("error", "")).lower():
-                    # 超时/断连不一定失败 — relay 可能已完成上传（跨太平洋连接慢）
-                    # 标记为成功，保留本地文件供下次重试
-                    print(f"  [!] 上传超时/断连，可能已成功（保留文件供验证）")
-                    result["upload"] = upload_result
-                    result["upload_timeout"] = True
-                    upload_ok = True  # 乐观标记成功，避免重复下载已上传的书
                     success_count += 1
                 else:
                     print(f"  [!] 上传失败: {upload_result.get('error', '?')}")
