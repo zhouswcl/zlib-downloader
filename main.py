@@ -89,9 +89,9 @@ def upload_to_aliyundrive(
 
     rclone_cmd = "rclone"
     if not has_aliyun:
-        print("  正在安装最新版 rclone（含 aliyundrive 支持）...")
+        print("  正在安装 rclone v1.65.2（含 aliyundrive 支持）...")
         r = subprocess.run(
-            ["sudo", "bash", "-c", "curl -fsSL https://rclone.org/install.sh | bash"],
+            ["sudo", "bash", "-c", "curl -fsSL -o /tmp/rclone.deb https://github.com/rclone/rclone/releases/download/v1.65.2/rclone-v1.65.2-linux-amd64.deb && dpkg -i /tmp/rclone.deb"],
             capture_output=True, text=True, timeout=60,
         )
         if r.returncode != 0:
