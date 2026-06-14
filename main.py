@@ -16,6 +16,8 @@ import argparse
 import json
 import os
 import random
+import re
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -89,6 +91,48 @@ def human_size(n: int) -> str:
     return f"{n:.1f}TB"
 
 
+_FORMAT_PRIORITY = {"epub": 0, "mobi": 1, "pdf": 2, "azw3": 3, "txt": 4, "docx": 5, "html": 6}
+
+
+def _normalize_title(title: str) -> str:
+    """规范化书名，去掉副标题、作者名后缀、特殊符号，用于格式去重对比"""
+    t = title.strip()
+    # 去掉括号及其内容（副标题、作者注解等）
+    t = re.sub(r'[（(][^）)]*[）)]', '', t)
+    # 去掉 "= " 及后面的英文副标题
+    t = re.split(r'\s*=\s*', t)[0]
+    # 去掉 "——" 及后面的副标题
+    t = re.split(r'[—–]', t)[0]
+    # 去掉常见后缀
+    for suffix in ["(套装)", "(全本)", "(全册)", "(上册)", "(下册)", "（套装）", "（全本）"]:
+        t = t.replace(suffix, "")
+    # 去掉首尾空格和多余空格
+    t = re.sub(r'\s+', '', t)
+    return t.strip().lower()
+
+
+def _dedup_by_format(books: list[dict]) -> list[dict]:
+    """同一本书只保留一种格式，优先 EPUB → MOBI → 其他"""
+    groups: dict[str, list[dict]] = {}
+    for b in books:
+        key = _normalize_title(b.get("title", ""))
+        if key:
+            groups.setdefault(key, []).append(b)
+
+    result = []
+    for key, versions in groups.items():
+        # 按格式优先级排序
+        versions.sort(key=lambda v: _FORMAT_PRIORITY.get(v.get("extension", ""), 99))
+        chosen = versions[0]
+        if len(versions) > 1:
+            kept = chosen.get("extension", "?").upper()
+            skipped = ", ".join(f"{v.get('extension','?').upper()}({v.get('id','')})" for v in versions[1:])
+            print(f"  [i] 去重: \"{chosen.get('title','')[:40]}...\" 保留{kept}，跳过{skipped}")
+        result.append(chosen)
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Z-Library 每日图书下载器")
     parser.add_argument("--keywords", help="搜索关键词 (逗号分隔，不传则从 config 轮换)")
@@ -100,25 +144,26 @@ def main():
 
     config = load_config()
     keywords = select_keywords(args.keywords, config)
-    max_downloads = min(args.max_downloads, config.get("max_daily", 10))
+    max_downloads = min(args.max_downloads, config.get("max_daily", 50))
 
     upload_enabled = args.upload and not args.skip_upload
 
-    zlib_email = os.environ.get("ZLIB_EMAIL", "")
+    # 收集所有可用的 Z-Library 账号
     zlib_password = os.environ.get("ZLIB_PASSWORD", "")
-
-    if not zlib_email or not zlib_password:
-        # 尝试从 config 轮换账号
-        accounts = config.get("accounts", [])
-        if accounts:
-            day_of_year = datetime.now().timetuple().tm_yday
-            idx = day_of_year % len(accounts)
-            zlib_email = accounts[idx]
-            print(f"  轮换账号: {zlib_email[:10]}*** (第 {idx+1}/{len(accounts)} 个)")
-    
-    if not zlib_email or not zlib_password:
-        print("ERROR: ZLIB_EMAIL and ZLIB_PASSWORD must be set")
+    if not zlib_password:
+        print("ERROR: ZLIB_PASSWORD must be set")
         sys.exit(1)
+
+    env_email = os.environ.get("ZLIB_EMAIL", "")
+    all_accounts = list(config.get("accounts", []))
+    if env_email and env_email not in all_accounts:
+        all_accounts.insert(0, env_email)
+
+    if not all_accounts:
+        print("ERROR: No Z-Library accounts configured (ZLIB_EMAIL or config.accounts)")
+        sys.exit(1)
+
+    print(f"  Z-Library 账号数: {len(all_accounts)}")
 
     upload_ready = False
     if upload_enabled:
@@ -132,6 +177,10 @@ def main():
     total_size = 0
     success_count = 0
 
+    date_str = datetime.now().strftime("%Y%m%d")
+    dl_dir = DOWNLOAD_DIR / date_str
+    dl_dir.mkdir(parents=True, exist_ok=True)
+
     print(f"\n{'='*60}")
     print(f"  Z-Library 图书下载 - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"  关键词: {', '.join(keywords)}")
@@ -139,39 +188,43 @@ def main():
     print(f"  上传: {'是' if upload_enabled else '否'}")
     print(f"{'='*60}\n")
 
-    # Step 1: 登录
-    print("[1/4] 登录 Z-Library...")
-    print("  登录中...")
-    try:
-        zlib_client.login(zlib_email, zlib_password)
-        print("  [✓] 登录成功")
-        session = zlib_client.load_session()
-        print(f"  域: {session.get('domain', '?')}")
-    except Exception as e:
-        print(f"  [FAIL] 登录失败: {e}")
+
+    # ── 辅助函数 ──
+
+    def _login_account(acct_idx: int) -> bool:
+        """登录指定账号，返回是否成功"""
+        email = all_accounts[acct_idx]
+        print(f"  登录账号 [{acct_idx+1}/{len(all_accounts)}]: {email[:10]}***")
+        try:
+            zlib_client.login(email, zlib_password)
+            print(f"  [✓] 登录成功 (域: {(zlib_client.load_session() or {}).get('domain','?')})")
+            return True
+        except Exception as e:
+            print(f"  [FAIL] 登录失败: {e}")
+            return False
+
+    def _get_remaining(acct_idx: int) -> int:
+        """查询当前账号的剩余下载额度"""
+        try:
+            limit = zlib_client.get_daily_limit()
+            remaining = limit.get("remaining", 0)
+            used = limit.get("used", 0)
+            total = limit.get("total", 10)
+            print(f"  账号 [{acct_idx+1}/{len(all_accounts)}]: 今日 {used}/{total}，剩余 {remaining}")
+            return remaining
+        except Exception as e:
+            print(f"  [!] 查询限额失败: {e}")
+            return -1  # 未知，假设有额度
+
+
+    # ── 第1步：搜索图书 ──
+
+    print("[1/4] 登录 Z-Library 并搜索图书...")
+    current_account_idx = 0
+    if not _login_account(current_account_idx):
         sys.exit(1)
 
-    # Step 2: 查询今日限额
-    print("[2/4] 查询下载限额...")
-    try:
-        limit = zlib_client.get_daily_limit()
-        used = limit.get("used", 0)
-        total = limit.get("total", 10)
-        remaining = limit.get("remaining", 10)
-        print(f"  今日已下载: {used}/{total} | 剩余: {remaining}")
-        max_downloads = min(max_downloads, remaining)
-    except Exception as e:
-        print(f"  [!] 查询限额失败: {e}")
-        print(f"  假设剩余: {max_downloads}")
-
-    if max_downloads <= 0:
-        print("[!] 今日额度已用完")
-        sys.exit(0)
-
-    # Step 3: 搜索并下载
-    print(f"[3/4] 搜索并下载 (最多 {max_downloads} 本)...")
     books_collected = []
-
     for kw in keywords:
         if len(books_collected) >= max_downloads:
             break
@@ -181,11 +234,9 @@ def main():
         except Exception as e:
             print(f"  [!] 搜索失败: {e}")
             continue
-
         if not books:
             print(f"  无结果")
             continue
-
         print(f"  找到 {len(books)} 本")
         for b in books:
             bid = b.get("id", "")
@@ -199,20 +250,70 @@ def main():
         print("\n[!] 没有可下载的新书")
         sys.exit(0)
 
-    print(f"\n  将下载 {len(books_collected)} 本...")
+    # 格式去重
+    books_collected = _dedup_by_format(books_collected)
 
-    date_str = datetime.now().strftime("%Y%m%d")
-    dl_dir = DOWNLOAD_DIR / date_str
-    dl_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\n  将下载 {len(books_collected)} 本（去重后）...")
+
+
+    # ── 第2步：检查账号额度 ──
+
+    print("\n[2/4] 检查账号额度...")
+    remaining = _get_remaining(current_account_idx)
+    if remaining == 0:
+        print("  [!] 当前账号已用完额度，尝试切换...")
+        # 换个账号
+        for i in range(1, len(all_accounts)):
+            next_idx = (current_account_idx + i) % len(all_accounts)
+            print(f"\n  [>>] 尝试账号 {next_idx+1}/{len(all_accounts)}...")
+            if _login_account(next_idx):
+                current_account_idx = next_idx
+                remaining = _get_remaining(current_account_idx)
+                if remaining > 0:
+                    break
+                elif remaining == 0:
+                    continue
+        if remaining == 0:
+            print("  [!] 所有账号额度已用完")
+            sys.exit(0)
+    elif remaining < 0:
+        remaining = max_downloads  # 未知，按最大值算
+
+
+    # ── 第3步：下载并上传 ──
+
+    print(f"\n[3/4] 下载并上传 ({len(books_collected)} 本)...")
 
     for i, book in enumerate(books_collected, 1):
         bid = book.get("id", "")
         title = book.get("title", "未知")[:50]
         author = (book.get("author") or "未知")[:20]
         ext = book.get("extension", "pdf")
+        fmt_upper = ext.upper()
         print(f"\n  [{i}/{len(books_collected)}] {title}")
-        print(f"        作者: {author} | 格式: {ext} | ID: {bid}")
+        print(f"        作者: {author} | 格式: {fmt_upper} | ID: {bid}")
 
+        # 检查当前账号是否有额度，无则切换
+        remaining = _get_remaining(current_account_idx)
+        if remaining == 0:
+            # 找下一个有额度的账号
+            switched = False
+            for j in range(1, len(all_accounts)):
+                next_idx = (current_account_idx + j) % len(all_accounts)
+                if next_idx == current_account_idx:
+                    break
+                print(f"  [>>] 当前账号无额度，尝试账号 {next_idx+1}/{len(all_accounts)}...")
+                if _login_account(next_idx):
+                    current_account_idx = next_idx
+                    r = _get_remaining(current_account_idx)
+                    if r > 0:
+                        switched = True
+                        break
+            if not switched:
+                print(f"  [!] 所有账号额度已用完，停止下载")
+                break
+
+        # 下载
         try:
             result = zlib_client.download(bid, str(dl_dir))
         except Exception as e:
@@ -225,21 +326,12 @@ def main():
 
             upload_ok = False
             if upload_ready:
-                print(f"  通过中转上传阿里云盘...")
+                print(f"  上传夸克网盘...")
                 upload_result = upload_file(result["filepath"], result["size"])
                 if upload_result.get("success"):
                     print(f"  [✓] 上传成功")
                     result["upload"] = upload_result
                     upload_ok = True
-                    success_count += 1
-                elif "timed out" in (upload_result.get("error", "")).lower() or \
-                     "connection aborted" in (upload_result.get("error", "")).lower():
-                    # 超时/断连不一定失败 — relay 可能已完成上传（跨太平洋连接慢）
-                    # 标记为成功，保留本地文件供下次重试
-                    print(f"  [!] 上传超时/断连，可能已成功（保留文件供验证）")
-                    result["upload"] = upload_result
-                    result["upload_timeout"] = True
-                    upload_ok = True  # 乐观标记成功，避免重复下载已上传的书
                     success_count += 1
                 else:
                     print(f"  [!] 上传失败: {upload_result.get('error', '?')}")

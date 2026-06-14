@@ -1,0 +1,15 @@
+[Unit]
+Description=Aliyun Relay - Receive files from GitHub Actions, upload to Aliyun Drive via China IP
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/zlib-downloader
+ExecStart=/usr/bin/python3 /home/ubuntu/zlib-downloader/aliyun_relay.py
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/ubuntu/zlib-downloader/.relay.env
+
+[Install]
+WantedBy=multi-user.target
