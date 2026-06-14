@@ -1,0 +1,44 @@
+name: Z-Library Daily Downloader
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      keywords:
+        description: '搜索关键词（逗号分隔，留空则自动轮换）'
+        required: false
+        default: ''
+      max-downloads:
+        description: '最多下载本数'
+        required: false
+        default: '10'
+
+concurrency:
+  group: zlib-downloader
+  cancel-in-progress: false
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 执行下载并上传
+        env:
+          ZLIB_EMAIL: ${{ secrets.ZLIB_EMAIL }}
+          ZLIB_PASSWORD: ${{ secrets.ZLIB_PASSWORD }}
+          ALIYUNDRIVE_REFRESH_TOKEN: ${{ secrets.ALIYUNDRIVE_REFRESH_TOKEN }}
+          ALIYUNDRIVE_PARENT_ID: ${{ secrets.ALIYUNDRIVE_PARENT_ID }}
+        run: |
+          python main.py --keywords "${{ inputs.keywords || '' }}" --max-downloads "${{ inputs.max-downloads || '10' }}" --json
