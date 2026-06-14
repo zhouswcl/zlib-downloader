@@ -88,10 +88,10 @@ def upload_file(local_path: str, file_size: int) -> dict:
         print("  正在安装 aliyunpan CLI...")
         install_cmd = (
             "wget -q -O /tmp/aliyunpan.zip "
-            "https://github.com/tickstep/aliyunpan/releases/download/v0.3.7/"
-            "aliyunpan-v0.3.7-linux-amd64.zip && "
+            "https://github.com/tickstep/aliyunpan/releases/download/v0.3.9/"
+            "aliyunpan-v0.3.9-linux-amd64.zip && "
             "unzip -q -o /tmp/aliyunpan.zip -d /tmp/aliyunpan && "
-            "cp /tmp/aliyunpan/aliyunpan-v0.3.7-linux-amd64/aliyunpan /usr/local/bin/ && "
+            "cp /tmp/aliyunpan/aliyunpan-v0.3.9-linux-amd64/aliyunpan /usr/local/bin/ && "
             "chmod +x /usr/local/bin/aliyunpan && "
             "rm -rf /tmp/aliyunpan*"
         )
@@ -113,7 +113,7 @@ def upload_file(local_path: str, file_size: int) -> dict:
     # 上传
     print(f"  上传中 ({filename}, {file_size} bytes)...")
     r = subprocess.run(
-        ["aliyunpan", "upload", local_path, remote_dir],
+        ["aliyunpan", "upload", "-drive", "backup", local_path, remote_dir],
         capture_output=True, text=True, timeout=600,
     )
     stdout = (r.stdout or "").strip()
