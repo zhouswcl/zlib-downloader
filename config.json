@@ -14,9 +14,10 @@
     "创新"
   ],
   "max_daily": 10,
+  "max_search_pages": 2,
   "domains": [
-    "https://singlelogin.re",
     "https://z-lib.sk",
+    "https://singlelogin.re",
     "https://z-lib.io"
   ]
 }
