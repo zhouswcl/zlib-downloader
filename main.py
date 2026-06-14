@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Z-Library 下载器（使用 heartleo/zlib Go CLI）
-通过 subprocess 调用 zlib 二进制处理 Z-Library 交互，
-Python 只负责阿里云盘上传。
+Z-Library 图书下载器
+用 zlib login 获取认证 Cookie，Python 通过 HTTP 完成搜索和下载
 """
 
 import argparse
@@ -27,6 +26,10 @@ ALIYUN_TOKEN_URL = "https://api.aliyundrive.com/v2/account/token"
 ALIYUN_CREATE_URL = "https://api.aliyundrive.com/v2/file/create"
 ALIYUN_COMPLETE_URL = "https://api.aliyundrive.com/v2/file/complete"
 
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+
+# ── History ────────────────────────────────────────────────────
 
 def load_history() -> set:
     if HISTORY_FILE.exists():
@@ -34,169 +37,199 @@ def load_history() -> set:
             return set(json.load(f))
     return set()
 
-
 def save_history(book_ids: set):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(HISTORY_FILE, "w") as f:
         json.dump(list(book_ids), f)
 
 
+# ── Z-Library (via zlib session) ──────────────────────────────
+
+ZLIB_SESSION_FILE = Path.home() / ".config" / "zlib" / "session.json"
+DEFAULT_DOMAINS = ["https://z-lib.sk", "https://z-lib.is"]
+
+
 def zlib_login(email: str, password: str):
-    """登录 Z-Library"""
+    """用 zlib CLI 登录，得到 session 文件"""
     print(f"  登录中...")
     result = subprocess.run(
         ["zlib", "login", "--email", email, "--password", password],
         capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"登录失败: {result.stderr[:200]}")
+        raise RuntimeError(f"登录失败: {result.stderr[:300]}")
+    if not ZLIB_SESSION_FILE.exists():
+        raise RuntimeError("登录成功但未找到 session 文件")
     print(f"  [✓] 登录成功")
 
 
-def zlib_search(query: str) -> list[dict]:
-    """搜索图书，返回列表"""
-    print(f"  搜索: '{query}'")
-    result = subprocess.run(
-        ["zlib", "search", query, "--page", "1"],
-        capture_output=True, text=True, timeout=30,
-    )
-    print(f"  zlib 返回码: {result.returncode}")
-    print(f"  stdout ({len(result.stdout)}B): {result.stdout[:500]}")
-    if result.stderr:
-        print(f"  stderr ({len(result.stderr)}B): {result.stderr[:300]}")
+def create_session() -> requests.Session:
+    """从 zlib session 文件创建已认证的 requests Session"""
+    with open(ZLIB_SESSION_FILE) as f:
+        session_data = json.load(f)
 
-    if result.returncode != 0:
-        print(f"  [!] 搜索失败")
+    s = requests.Session()
+    s.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"})
+
+    domain = session_data.get("domain", "https://z-lib.sk")
+    cookies = session_data.get("cookies", {})
+
+    # 恢复 cookie
+    for name, value in cookies.items():
+        s.cookies.set(name, value, domain=domain.replace("https://", ""))
+
+    s.domain = domain
+    s.logged_in = bool(cookies)
+    return s
+
+
+def search_books(session: requests.Session, query: str, page: int = 1, count: int = 10) -> list[dict]:
+    """搜索图书，返回列表"""
+    domain = getattr(session, "domain", "https://z-lib.sk")
+    encoded = requests.utils.quote(query)
+    url = f"{domain}/s/{encoded}?&page={page}"
+    print(f"  URL: {url}")
+
+    resp = session.get(url, timeout=30, headers={
+        "Referer": f"{domain}/",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    })
+
+    if resp.status_code == 503:
+        print(f"  503 服务忙，等 5 秒重试...")
+        time.sleep(5)
+        resp = session.get(url, timeout=30)
+
+    if resp.status_code != 200:
+        print(f"  HTTP {resp.status_code}")
         return []
 
-    books = _parse_zlib_search_output(result.stdout)
-    print(f"  解析到 {len(books)} 本书")
-    return books
+    html = resp.text
+
+    # 检测并跟随 JS 挑战重定向
+    m = re.search(r"redirect_link\s*=\s*'([^']+)'", html)
+    if m:
+        print(f"  检测到挑战，跟随...")
+        resp2 = session.get(m.group(1), timeout=30)
+        if resp2.status_code == 200:
+            html = resp2.text
+
+    return parse_search_results(html, domain, count)
 
 
-def _parse_zlib_search_output(output: str) -> list[dict]:
-    """解析 zlib search 的文本表格输出"""
+def parse_search_results(html: str, domain: str, limit: int = 10) -> list[dict]:
+    """解析图书列表"""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
     books = []
-    lines = output.strip().split("\n")
 
-    for line in lines:
-        # 从表格行提取: 编号. ID 标题 | 作者 | 格式 | 评分
-        line = line.strip()
+    # 策略 1: z-bookcard
+    for tag in soup.select("z-bookcard, [is='z-bookcard']"):
+        book = {
+            "id": (tag.get("id") or "").strip(),
+            "title": "",
+            "author": "",
+            "extension": (tag.get("extension") or "").strip(),
+            "size": (tag.get("filesize") or "").strip(),
+            "url": "",
+        }
+        href = tag.get("href", "")
+        if href:
+            book["url"] = domain + href if href.startswith("/") else href
 
-        # 跳过非数据行
-        if not line or line.startswith("No results") or line.startswith("Found"):
-            continue
+        title_el = tag.select_one('[slot="title"]')
+        if title_el:
+            book["title"] = title_el.get_text(strip=True)
 
-        # 尝试提取 book ID (通常是第一列的数字+字母)
-        m = re.match(r"\s*\d+\.\s*(\S+)", line)
-        if not m:
-            continue
+        author_el = tag.select_one('[slot="author"]')
+        if author_el:
+            book["author"] = author_el.get_text(strip=True)
 
-        book_id = m.group(1)
-        if not book_id or len(book_id) < 5:
-            continue
+        if book.get("id") or book.get("title"):
+            books.append(book)
 
-        books.append({"id": book_id})
+    # 策略 2: a[href*="/book/"] 通用匹配
+    if not books:
+        for a in soup.select('a[href*="/book/"]'):
+            href = a.get("href", "")
+            m = re.search(r"/book/([^/]+)", href)
+            bid = m.group(1) if m else ""
+            title = a.get_text(strip=True)
+            if bid and title and len(bid) > 3:
+                url = domain + href if href.startswith("/") else href
+                books.append({"id": bid, "title": title, "url": url})
 
-    return books
+    # 去重，限制数量
+    seen = set()
+    unique = []
+    for b in books:
+        bid = b.get("id", "")
+        if bid and bid not in seen:
+            seen.add(bid)
+            unique.append(b)
+        if len(unique) >= limit:
+            break
 
-
-def zlib_get_book_info(book_id: str) -> dict:
-    """获取图书详细信息（通过 book 页面 URL）"""
-    # 从详情页提取信息
-    # 使用 ZLIB_DOMAIN 环境变量
-    domain = os.environ.get("ZLIB_DOMAIN", "https://z-lib.sk")
-    try:
-        import requests
-        resp = requests.get(f"{domain}/book/{book_id}", timeout=15,
-                            headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code == 200:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(resp.text, "html.parser")
-            title = ""
-            author = ""
-            ext = ""
-            size_text = ""
-
-            zcover = soup.select_one("z-cover")
-            if zcover:
-                title = (zcover.get("title") or "").strip()
-
-            if not title:
-                h1 = soup.select_one("h1, [class*=title]")
-                if h1:
-                    title = h1.get_text(strip=True)
-
-            author_el = soup.select_one("i.authors a, [class*=author] a")
-            if author_el:
-                author = author_el.get_text(strip=True)
-
-            for prop in soup.select(".bookDetailsBox .property__file .property_value, "
-                                    ".bookDetailsBox [class*=file] .property_value"):
-                text = prop.get_text(strip=True)
-                m = re.search(r"\b(pdf|epub|mobi|txt|djvu|fb2|docx?)\b", text, re.I)
-                if m:
-                    ext = m.group(1).lower()
-                m = re.search(r"(\d+(?:[.,]\d+)?)\s*(MB|KB|GB)", text, re.I)
-                if m:
-                    size_text = m.group(0)
-
-            return {"title": title, "author": author, "extension": ext, "size": size_text}
-    except Exception:
-        pass
-    return {}
+    return unique
 
 
-def zlib_download(book_id: str, dest_dir: str) -> dict | None:
+def download_book(session: requests.Session, book_id: str, dest_dir: str) -> dict | None:
     """下载图书"""
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
+    domain = getattr(session, "domain", "https://z-lib.sk")
 
-    print(f"  下载: {book_id}")
+    # 构造下载 URL
+    dl_url = None
+    for prefix in ("/dl/", "/file/"):
+        try:
+            resp = session.head(f"{domain}{prefix}{book_id}", allow_redirects=True, timeout=15)
+            if resp.status_code == 200 and resp.url:
+                dl_url = resp.url
+                break
+        except Exception:
+            continue
+
+    if not dl_url:
+        print(f"  [!] 无法获取下载链接")
+        return None
+
+    print(f"  下载: {dl_url}")
     try:
-        result = subprocess.run(
-            ["zlib", "download", book_id, "--dir", str(dest_dir)],
-            capture_output=True, text=True, timeout=300,
-        )
-
-        stdout = result.stdout + result.stderr
-        print(f"  zlib 输出: {stdout[:200]}")
-
-        if result.returncode != 0:
-            print(f"  [!] 下载失败: {result.stderr[:200]}")
+        resp = session.get(dl_url, stream=True, timeout=600)
+        if resp.status_code != 200:
+            print(f"  HTTP {resp.status_code}")
             return None
 
-        # 从输出中提取文件名和大小
-        m = re.search(r"Saved to:\s*(\S+)\s*\((\d+)\s*bytes\)", stdout)
+        # 提取文件名
+        filename = f"{book_id}.pdf"
+        cd = resp.headers.get("content-disposition", "")
+        m = re.search(r'filename\s*=\s*["\']?([^"\';\n]+)', cd)
         if m:
-            filepath = m.group(1)
-            size = int(m.group(2))
-            return {
-                "filepath": filepath,
-                "filename": Path(filepath).name,
-                "size": size,
-                "book_id": book_id,
-            }
+            filename = m.group(1).strip().strip('"').strip("'")
+        else:
+            parts = dl_url.rstrip("/").split("/")
+            if parts and "." in (parts[-1].split("?")[0] or ""):
+                filename = parts[-1].split("?")[0]
 
-        # fallback: 找目录中最新文件
-        files = sorted(dest_dir.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True)
-        if files:
-            f = files[0]
-            return {
-                "filepath": str(f),
-                "filename": f.name,
-                "size": f.stat().st_size,
-                "book_id": book_id,
-            }
+        filepath = dest_dir / filename
+        total = int(resp.headers.get("content-length", 0))
+        downloaded = 0
 
-        return None
-    except subprocess.TimeoutExpired:
-        print(f"  [!] 下载超时")
-        return None
+        with open(filepath, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+        print(f"  [✓] {filename} ({human_size(downloaded)})")
+        return {"filepath": str(filepath), "filename": filename, "size": downloaded, "book_id": book_id}
     except Exception as e:
         print(f"  [!] 下载异常: {e}")
         return None
 
+
+# ── 阿里云盘 ──────────────────────────────────────────────────
 
 def upload_to_aliyundrive(local_path: str, refresh_token: str, parent_id: str = "root") -> dict:
     """上传文件到阿里云盘"""
@@ -250,17 +283,23 @@ def human_size(n: int) -> str:
     return f"{n:.1f}TB"
 
 
+# ── Main ──────────────────────────────────────────────────────
+
 def main():
-    parser = argparse.ArgumentParser(description="Z-Library 图书下载 (zlib CLI)")
-    parser.add_argument("--keywords", default="热门图书", help="搜索关键词")
+    parser = argparse.ArgumentParser(description="Z-Library 图书下载")
+    parser.add_argument("--keywords", default="", help="搜索关键词（逗号分隔）")
     parser.add_argument("--max-downloads", type=int, default=10)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--upload", action="store_true", default=True)
     args = parser.parse_args()
 
-    keywords = [k.strip() for k in args.keywords.split(",")] if args.keywords else ["热门图书"]
-    max_downloads = args.max_downloads
+    # 关键词
+    if args.keywords:
+        keywords = [k.strip() for k in args.keywords.split(",")]
+    else:
+        keywords = ["编程", "科技", "人工智能", "Python", "机器学习", "经济管理", "历史", "传记"]
 
+    max_downloads = min(args.max_downloads, 10)
     zlib_email = os.environ.get("ZLIB_EMAIL", "")
     zlib_password = os.environ.get("ZLIB_PASSWORD", "")
     aliyun_token = os.environ.get("ALIYUNDRIVE_REFRESH_TOKEN", "")
@@ -276,18 +315,22 @@ def main():
     success_count = 0
 
     print(f"\n{'='*60}")
-    print(f"  Z-Library 图书下载 - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"  Z-Library - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"  关键词: {', '.join(keywords)}")
     print(f"  最多: {max_downloads} 本")
     print(f"{'='*60}\n")
 
     # Step 1: 登录
-    print("[1/3] 登录 Z-Library...")
+    print("[1/3] 登录...")
     try:
         zlib_login(zlib_email, zlib_password)
     except Exception as e:
         print(f"[FAIL] {e}")
         sys.exit(1)
+
+    # 创建已认证的 session
+    session = create_session()
+    print(f"  域: {getattr(session, 'domain', '?')}")
 
     # Step 2: 搜索并下载
     print(f"[2/3] 搜索并下载...")
@@ -296,16 +339,28 @@ def main():
     for kw in keywords:
         if len(books_to_download) >= max_downloads:
             break
-        books = zlib_search(kw)
+        print(f"\n  搜索 '{kw}'...")
+        try:
+            books = search_books(session, kw)
+        except Exception as e:
+            print(f"  [!] 搜索异常: {e}")
+            continue
+
+        if not books:
+            print(f"  无结果")
+            continue
+
+        print(f"  找到 {len(books)} 本")
         for b in books:
             bid = b.get("id", "")
             if bid and bid not in downloaded_ids:
+                b["_keyword"] = kw
                 books_to_download.append(b)
                 if len(books_to_download) >= max_downloads:
                     break
 
     if not books_to_download:
-        print("[!] 没有可下载的新书")
+        print("\n[!] 没有可下载的新书")
         sys.exit(0)
 
     print(f"\n  将下载 {len(books_to_download)} 本...")
@@ -315,17 +370,20 @@ def main():
 
     for i, book in enumerate(books_to_download, 1):
         bid = book["id"]
-        print(f"\n  [{i}/{len(books_to_download)}] ID: {bid}")
+        title = (book.get("title") or "?")[:40]
+        ext = book.get("extension", "?")
+        size = book.get("size", "?")
+        kw = book.get("_keyword", "")
+        print(f"\n  [{i}/{len(books_to_download)}] [{kw}] {title}")
+        print(f"      ID: {bid} | {ext} | {size}")
 
-        result = zlib_download(bid, str(dl_dir))
+        result = download_book(session, bid, str(dl_dir))
         if not result:
             print(f"  [!] 下载失败，跳过")
             continue
 
-        print(f"  [✓] 下载完成: {result['filename']} ({human_size(result['size'])})")
         total_size += result["size"]
 
-        # 上传阿里云盘
         upload_ok = False
         if args.upload and aliyun_token:
             print(f"  上传阿里云盘...")
@@ -347,7 +405,6 @@ def main():
             downloaded_ids.add(bid)
             save_history(downloaded_ids)
 
-        # 间隔
         if i < len(books_to_download):
             delay = random.uniform(3, 8)
             print(f"  等待 {delay:.0f}s...")
