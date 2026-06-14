@@ -112,8 +112,9 @@ def upload_file(local_path: str, file_size: int) -> dict:
 
     # 上传
     print(f"  上传中 ({filename}, {file_size} bytes)...")
+    # --drive-id 指定网盘（如 resource=资源盘, backup=备份盘）
     r = subprocess.run(
-        ["aliyunpan", "upload", local_path, remote_dir],
+        ["aliyunpan", "upload", "--drive-id", "resource", local_path, remote_dir],
         capture_output=True, text=True, timeout=600,
     )
     stdout = (r.stdout or "").strip()
