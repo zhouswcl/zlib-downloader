@@ -283,6 +283,12 @@ def download(book_id: str, dest_dir: str, timeout: int = 600) -> Optional[dict]:
     if exit_code != 0:
         print(f"  [!] 下载命令返回退出码 {exit_code}")
         print(f"  错误: {error_detail}")
+
+        # 检测 "no download URL available" — 这是 Z-Library 侧的问题，fallback 也没用
+        if "no download URL available" in error_detail.lower() or "no download" in error_detail.lower():
+            print(f"  [x] Z-Library 无此书的下载链接，跳过 fallback")
+            return None
+
         # 尝试 fallback：不用 PTY，直接用 subprocess 跑（bubbletea 可能不支持 script）
         print(f"  [!] 尝试备用下载方式 (直接子进程)...")
         try:
