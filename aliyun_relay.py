@@ -21,9 +21,11 @@ API:
 import hashlib
 import json
 import os
+import socket
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from socketserver import ThreadingMixIn
 from urllib.parse import urlparse
 from typing import Optional
 
@@ -186,7 +188,13 @@ def relay_upload_to_aliyun(local_path: str, refresh_token: str,
     return {"success": False, "error": f"完成上传失败: HTTP {r2.status_code}"}
 
 
-class RelayHandler(BaseHTTPRequestHandler):
+class ThreadingRelayServer(ThreadingMixIn, HTTPServer):
+    """多线程 HTTP 服务器，支持并发请求"""
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+class AliyunRelayHandler(BaseHTTPRequestHandler):
     def _send_json(self, status_code: int, data: dict):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status_code)
@@ -299,7 +307,7 @@ def main():
     if not rt:
         print("WARNING: ALIYUNDRIVE_REFRESH_TOKEN not set!")
 
-    server = HTTPServer(("0.0.0.0", port), RelayHandler)
+    server = ThreadingRelayServer(("0.0.0.0", port), AliyunRelayHandler)
     server.allow_reuse_address = True
     server.socket.settimeout(600)  # 10 min socket timeout for large uploads
     print(f"\n{'='*50}")
