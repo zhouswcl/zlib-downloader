@@ -263,8 +263,14 @@ def main():
 
     # 格式去重
     books_collected = _dedup_by_format(books_collected)
+    
+    # 过滤 PDF（用户要求不下载 PDF）
+    before = len(books_collected)
+    books_collected = [b for b in books_collected if b.get("extension", "").lower() != "pdf"]
+    if before - len(books_collected) > 0:
+        print(f"  过滤掉 {before - len(books_collected)} 本 PDF")
 
-    print(f"\n  将下载 {len(books_collected)} 本（去重后）...")
+    print(f"\n  将下载 {len(books_collected)} 本（去重+过滤后）...")
 
 
     # ── 第2步：检查账号额度 ──
