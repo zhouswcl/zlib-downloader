@@ -34,8 +34,8 @@ jobs:
           curl -fsSL -o /tmp/zlib.tar.gz \
             "https://github.com/heartleo/zlib/releases/download/v0.0.4/zlib_0.0.4_linux_x86_64.tar.gz"
           tar xzf /tmp/zlib.tar.gz -C /tmp
-          chmod +x /tmp/zlib_0.0.4_linux_x86_64/zlib
-          sudo mv /tmp/zlib_0.0.4_linux_x86_64/zlib /usr/local/bin/zlib
+          chmod +x /tmp/zlib
+          sudo mv /tmp/zlib /usr/local/bin/zlib
           echo "ZLIB_HOME=/usr/local/bin" >> $GITHUB_ENV
 
       - name: Verify zlib CLI
