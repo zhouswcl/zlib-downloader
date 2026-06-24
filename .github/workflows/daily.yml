@@ -45,8 +45,6 @@ jobs:
         env:
           ZLIB_EMAIL: ${{ secrets.ZLIB_EMAIL }}
           ZLIB_PASSWORD: ${{ secrets.ZLIB_PASSWORD }}
-          RELAY_URL: ${{ secrets.RELAY_URL }}
-          RELAY_TOKEN: ${{ secrets.RELAY_TOKEN }}
         run: |
           ARGS=""
           if [ -n "${{ github.event.inputs.keywords }}" ]; then
@@ -55,4 +53,12 @@ jobs:
           if [ -n "${{ github.event.inputs.max_downloads }}" ]; then
             ARGS="$ARGS --max-downloads ${{ github.event.inputs.max_downloads }}"
           fi
-          python -u main.py $ARGS --json
+          python -u main.py $ARGS --skip-upload --json
+
+      - name: Upload books as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zlib-books
+          path: downloads/
+          retention-days: 7
+          if-no-files-found: warn
